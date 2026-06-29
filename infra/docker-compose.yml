@@ -1,0 +1,162 @@
+name: rsap
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-rsap}
+      POSTGRES_USER: ${POSTGRES_USER:-rsap_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_strong_password}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    networks:
+      - rsap-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      sh -c 'exec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"'
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change_me_strong_redis_password}
+    volumes:
+      - redis-data:/data
+    networks:
+      - rsap-net
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-change_me_minio_secret}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - rsap-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  webapp-backend:
+    build:
+      context: ../apps/webapp-backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-rsap}
+      POSTGRES_USER: ${POSTGRES_USER:-rsap_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_strong_password}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change_me_strong_redis_password}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-change_me_strong_redis_password}@redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-change_me_minio_secret}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      JWT_SECRET: ${JWT_SECRET:-change_me_32_char_minimum_secret_key}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_ACCESS_EXPIRE_MINUTES: ${JWT_ACCESS_EXPIRE_MINUTES:-15}
+      JWT_REFRESH_EXPIRE_DAYS: ${JWT_REFRESH_EXPIRE_DAYS:-7}
+      AES_ENCRYPTION_KEY: ${AES_ENCRYPTION_KEY:-change_me_32_byte_key_exactly_32}
+      LICENSE_SIGNING_SECRET: ${LICENSE_SIGNING_SECRET:-change_me_license_signing_key}
+      APP_ENV: ${APP_ENV:-development}
+    ports:
+      - "8000:8000"
+    networks:
+      - rsap-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  webapp-frontend:
+    build:
+      context: ../apps/webapp-frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
+    ports:
+      - "3000:3000"
+    networks:
+      - rsap-net
+    depends_on:
+      - webapp-backend
+
+  file-server:
+    build:
+      context: ../apps/file-server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-change_me_minio_secret}
+      MINIO_BUCKET_FACES: ${MINIO_BUCKET_FACES:-faces}
+      MINIO_BUCKET_CAPTURES: ${MINIO_BUCKET_CAPTURES:-captures}
+      MINIO_BUCKET_DOCUMENTS: ${MINIO_BUCKET_DOCUMENTS:-documents}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      FILE_SERVER_SERVICE_TOKEN: ${FILE_SERVER_SERVICE_TOKEN:-change_me_internal_service_token}
+    ports:
+      - "8002:8002"
+    networks:
+      - rsap-net
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - rsap-net
+    depends_on:
+      - webapp-backend
+      - webapp-frontend
+      - file-server
+      - minio
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  rsap-net:
+    name: rsap-net
+    driver: bridge

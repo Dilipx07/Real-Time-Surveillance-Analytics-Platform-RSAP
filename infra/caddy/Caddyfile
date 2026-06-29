@@ -1,0 +1,23 @@
+{
+	admin off
+}
+
+api.rsap.local {
+	tls internal
+	reverse_proxy webapp-backend:8000
+}
+
+app.rsap.local {
+	tls internal
+	reverse_proxy webapp-frontend:3000
+}
+
+files.rsap.local {
+	tls internal
+	reverse_proxy file-server:8002
+}
+
+minio.rsap.local {
+	tls internal
+	reverse_proxy minio:9001
+}

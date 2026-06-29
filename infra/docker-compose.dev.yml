@@ -1,0 +1,21 @@
+services:
+  webapp-backend:
+    volumes:
+      - ../apps/webapp-backend:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  webapp-frontend:
+    volumes:
+      - ../apps/webapp-frontend:/app
+      - webapp-frontend-node-modules:/app/node_modules
+    command: npm run dev
+    environment:
+      NODE_ENV: development
+
+  file-server:
+    volumes:
+      - ../apps/file-server:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8002 --reload
+
+volumes:
+  webapp-frontend-node-modules:
