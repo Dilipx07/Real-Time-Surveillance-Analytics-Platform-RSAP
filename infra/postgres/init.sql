@@ -60,7 +60,7 @@ CREATE TABLE events.registered_persons (
     event_id UUID,
     full_name VARCHAR(255) NOT NULL,
     phone VARCHAR(20) NOT NULL,
-    aadhaar_last4 CHAR(4) NOT NULL,
+    aadhaar_last4 TEXT NOT NULL,
     face_encoding BYTEA,
     face_image_id UUID,
     registered_by UUID REFERENCES auth.users(id),
