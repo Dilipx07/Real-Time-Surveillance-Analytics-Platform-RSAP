@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints, field_validator
 
 EmailString = Annotated[
     str,
@@ -15,6 +15,15 @@ EmailString = Annotated[
 ]
 
 
+def normalize_aware_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        raise ValueError("datetime must include a timezone")
+    return value.astimezone(UTC)
+
+
+AwareDatetime = Annotated[datetime, AfterValidator(normalize_aware_datetime)]
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -24,7 +33,5 @@ class UTCModel(StrictModel):
     @classmethod
     def require_aware_datetimes(cls, value: Any) -> Any:
         if isinstance(value, datetime):
-            if value.tzinfo is None:
-                raise ValueError("datetime must include a timezone")
-            return value.astimezone(UTC)
+            return normalize_aware_datetime(value)
         return value

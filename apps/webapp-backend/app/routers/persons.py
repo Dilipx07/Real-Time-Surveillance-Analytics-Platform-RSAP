@@ -13,9 +13,11 @@ from app.dependencies import CurrentUserDep, get_db, require_roles
 from app.encryption import encrypt_text
 from app.middleware.audit import write_audit_log
 from app.models.user import CurrentUser
-from app.responses import envelope
+from app.responses import PaginatedEnvelope, SuccessEnvelope, envelope
 from app.schemas.person import PersonUpdate
+from app.services.cleanup_service import enqueue_external_cleanup, process_external_cleanup_once
 from app.services.person_service import extract_single_face_encoding
+from app.services.rbac_service import authorize
 
 router = APIRouter()
 PERSON_COLUMNS = "id, event_id, full_name, phone, aadhaar_last4, face_image_id, registered_by, entry_status, entry_time, created_at, updated_at"
@@ -52,7 +54,7 @@ def public_person(row: asyncpg.Record, face_url: str | None = None) -> dict:
     return result
 
 
-@router.post("/", status_code=201)
+@router.post("/", status_code=201, response_model=SuccessEnvelope)
 async def create_person(
     request: Request,
     full_name: str = Form(min_length=1, max_length=255),
@@ -62,6 +64,7 @@ async def create_person(
     user: CurrentUser = Depends(require_roles("staff", "admin", "super_admin")),
     db: asyncpg.Connection = Depends(get_db),
 ):
+    authorize(user, "persons", "create", owner_id=user.id)
     jpeg, encoding = await prepare_face(face_image)
     object_name = await request.app.state.file_service.upload_file(
         get_settings().minio_bucket_faces, jpeg, "image/jpeg"
@@ -76,48 +79,76 @@ async def create_person(
             )
             await write_audit_log(db, request, user, "create", "events.registered_person", row["id"])
     except Exception:
-        await request.app.state.file_service.delete_file(get_settings().minio_bucket_faces, object_name)
+        await enqueue_external_cleanup(db, get_settings().minio_bucket_faces, object_name)
         raise
     return envelope(public_person(row))
 
 
-@router.get("/")
+@router.get("/", response_model=PaginatedEnvelope)
 async def list_persons(
     user: CurrentUserDep,
     db: asyncpg.Connection = Depends(get_db),
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), search: str | None = None,
 ):
+    permission = authorize(user, "persons", "read")
     search_value = f"%{search}%" if search else None
-    where = "($1::text IS NULL OR full_name ILIKE $1 OR phone ILIKE $1)"
-    total = await db.fetchval(f"SELECT count(*) FROM events.registered_persons WHERE {where}", search_value)
+    owner_only = bool((permission or {}).get("constraints", {}).get("owner_only"))
+    where = "($1::text IS NULL OR full_name ILIKE $1 OR phone ILIKE $1) AND (NOT $2::bool OR registered_by=$3)"
+    total = await db.fetchval(
+        f"SELECT count(*) FROM events.registered_persons WHERE {where}",
+        search_value, owner_only, user.id,
+    )
     rows = await db.fetch(
-        f"SELECT {PERSON_COLUMNS} FROM events.registered_persons WHERE {where} ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-        search_value, page_size, (page - 1) * page_size,
+        f"SELECT {PERSON_COLUMNS} FROM events.registered_persons WHERE {where} ORDER BY created_at DESC LIMIT $4 OFFSET $5",
+        search_value, owner_only, user.id, page_size, (page - 1) * page_size,
     )
     return envelope({"items": [public_person(row) for row in rows], "page": page, "page_size": page_size, "total": total})
 
 
-@router.get("/export")
-async def export_persons(admin: CurrentUser = Depends(require_roles("admin", "super_admin")), db: asyncpg.Connection = Depends(get_db)):
-    rows = await db.fetch(
-        "SELECT id, full_name, phone, entry_status, entry_time, created_at FROM events.registered_persons ORDER BY created_at"
-    )
-    stream = io.StringIO()
-    writer = csv.writer(stream)
-    writer.writerow(["id", "full_name", "phone", "entry_status", "entry_time", "created_at"])
-    for row in rows:
-        writer.writerow(list(row))
+@router.get(
+    "/export",
+    response_class=StreamingResponse,
+    responses={200: {"content": {"text/csv": {}}}},
+)
+async def export_persons(
+    request: Request,
+    admin: CurrentUser = Depends(require_roles("admin", "super_admin")),
+):
+    def render_csv(rows) -> str:
+        stream = io.StringIO()
+        writer = csv.writer(stream)
+        writer.writerows(rows)
+        return stream.getvalue()
+
+    async def stream_csv():
+        header = [["id", "full_name", "phone", "entry_status", "entry_time", "created_at"]]
+        yield await asyncio.to_thread(render_csv, header)
+        last_id: UUID | None = None
+        async with request.app.state.db_pool.acquire() as connection:
+            while True:
+                rows = await connection.fetch(
+                    """SELECT id, full_name, phone, entry_status, entry_time, created_at
+                       FROM events.registered_persons WHERE ($1::uuid IS NULL OR id > $1)
+                       ORDER BY id LIMIT 500""",
+                    last_id,
+                )
+                if not rows:
+                    break
+                yield await asyncio.to_thread(render_csv, rows)
+                last_id = rows[-1]["id"]
+
     return StreamingResponse(
-        iter([stream.getvalue()]), media_type="text/csv",
+        stream_csv(), media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=registered-persons.csv"},
     )
 
 
-@router.get("/{person_id}")
+@router.get("/{person_id}", response_model=SuccessEnvelope)
 async def get_person(person_id: UUID, user: CurrentUserDep, request: Request, db: asyncpg.Connection = Depends(get_db)):
     row = await db.fetchrow(f"SELECT {PERSON_COLUMNS} FROM events.registered_persons WHERE id=$1", person_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Registered person not found")
+    authorize(user, "persons", "read", owner_id=row["registered_by"], resource_id=person_id)
     url = None
     if row["face_image_id"]:
         url = await request.app.state.file_service.get_presigned_url(
@@ -126,8 +157,12 @@ async def get_person(person_id: UUID, user: CurrentUserDep, request: Request, db
     return envelope(public_person(row, url))
 
 
-@router.patch("/{person_id}")
+@router.patch("/{person_id}", response_model=SuccessEnvelope)
 async def update_person(payload: PersonUpdate, person_id: UUID, request: Request, user: CurrentUser = Depends(require_roles("staff", "admin", "super_admin")), db: asyncpg.Connection = Depends(get_db)):
+    person = await db.fetchrow("SELECT registered_by FROM events.registered_persons WHERE id=$1", person_id)
+    if person is None:
+        raise HTTPException(status_code=404, detail="Registered person not found")
+    authorize(user, "persons", "update", owner_id=person["registered_by"], resource_id=person_id)
     values = payload.model_dump(exclude_unset=True)
     if not values:
         raise HTTPException(status_code=400, detail="At least one field is required")
@@ -148,25 +183,34 @@ async def update_person(payload: PersonUpdate, person_id: UUID, request: Request
     return envelope(public_person(row))
 
 
-@router.delete("/{person_id}")
+@router.delete("/{person_id}", response_model=SuccessEnvelope)
 async def delete_person(person_id: UUID, request: Request, user: CurrentUser = Depends(require_roles("staff", "admin", "super_admin")), db: asyncpg.Connection = Depends(get_db)):
+    person = await db.fetchrow("SELECT registered_by FROM events.registered_persons WHERE id=$1", person_id)
+    if person is None:
+        raise HTTPException(status_code=404, detail="Registered person not found")
+    authorize(user, "persons", "delete", owner_id=person["registered_by"], resource_id=person_id)
     async with db.transaction():
         row = await db.fetchrow("DELETE FROM events.registered_persons WHERE id=$1 RETURNING face_image_id", person_id)
         if row is None:
             raise HTTPException(status_code=404, detail="Registered person not found")
+        if row["face_image_id"]:
+            await enqueue_external_cleanup(
+                db, get_settings().minio_bucket_faces, f"{row['face_image_id']}.jpg"
+            )
         await write_audit_log(db, request, user, "delete", "events.registered_person", person_id)
-    if row["face_image_id"]:
-        await request.app.state.file_service.delete_file(
-            get_settings().minio_bucket_faces, f"{row['face_image_id']}.jpg"
-        )
+    await process_external_cleanup_once(request.app)
     return envelope({"deleted": True})
 
 
-@router.post("/{person_id}/update-face")
+@router.post("/{person_id}/update-face", response_model=SuccessEnvelope)
 async def update_face(person_id: UUID, request: Request, face_image: UploadFile = File(), user: CurrentUser = Depends(require_roles("staff", "admin", "super_admin")), db: asyncpg.Connection = Depends(get_db)):
-    old_id = await db.fetchval("SELECT face_image_id FROM events.registered_persons WHERE id=$1", person_id)
-    if old_id is None:
+    person = await db.fetchrow(
+        "SELECT face_image_id, registered_by FROM events.registered_persons WHERE id=$1", person_id
+    )
+    if person is None:
         raise HTTPException(status_code=404, detail="Registered person not found")
+    old_id = person["face_image_id"]
+    authorize(user, "persons", "update", owner_id=person["registered_by"], resource_id=person_id)
     jpeg, encoding = await prepare_face(face_image)
     object_name = await request.app.state.file_service.upload_file(get_settings().minio_bucket_faces, jpeg, "image/jpeg")
     new_id = UUID(object_name.split(".", 1)[0])
@@ -176,10 +220,14 @@ async def update_face(person_id: UUID, request: Request, face_image: UploadFile 
                 f"UPDATE events.registered_persons SET face_encoding=$1, face_image_id=$2, updated_at=NOW() WHERE id=$3 RETURNING {PERSON_COLUMNS}",
                 encoding, new_id, person_id,
             )
+            if old_id:
+                await enqueue_external_cleanup(
+                    db, get_settings().minio_bucket_faces, f"{old_id}.jpg"
+                )
             await write_audit_log(db, request, user, "update_face", "events.registered_person", person_id)
     except Exception:
-        await request.app.state.file_service.delete_file(get_settings().minio_bucket_faces, object_name)
+        await enqueue_external_cleanup(db, get_settings().minio_bucket_faces, object_name)
         raise
     if old_id:
-        await request.app.state.file_service.delete_file(get_settings().minio_bucket_faces, f"{old_id}.jpg")
+        await process_external_cleanup_once(request.app)
     return envelope(public_person(row))

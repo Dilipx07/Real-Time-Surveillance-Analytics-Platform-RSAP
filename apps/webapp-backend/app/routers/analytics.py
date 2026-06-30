@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime, time
+from datetime import UTC, datetime, time
 from uuid import UUID
 
 import asyncpg
@@ -6,7 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.dependencies import CurrentUserDep, get_db
 from app.middleware.audit import write_audit_log
-from app.responses import envelope
+from app.responses import PaginatedEnvelope, SuccessEnvelope, envelope
+from app.schemas.common import AwareDatetime
+from app.services.rbac_service import authorize
 
 router = APIRouter()
 
@@ -17,12 +19,14 @@ def camera_scope(user, alias: str = "c") -> tuple[str, list]:
     return f"{alias}.user_id=$1", [user.id]
 
 
-@router.get("/events")
+@router.get("/events", response_model=PaginatedEnvelope)
 async def list_events(
     user: CurrentUserDep, db: asyncpg.Connection = Depends(get_db), page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100), camera_id: UUID | None = None,
-    event_type: str | None = None, date_from: datetime | None = None, date_to: datetime | None = None,
+    event_type: str | None = None, date_from: AwareDatetime | None = None,
+    date_to: AwareDatetime | None = None,
 ):
+    authorize(user, "analytics", "read", owner_id=user.id, resource_id=camera_id)
     scope, args = camera_scope(user)
     conditions = [scope]
     for column, value in (("e.camera_id", camera_id), ("e.event_type", event_type), ("e.created_at >=", date_from), ("e.created_at <=", date_to)):
@@ -44,7 +48,7 @@ async def list_events(
     return envelope({"items": [dict(row) for row in rows], "page": page, "page_size": page_size, "total": total})
 
 
-@router.get("/events/{event_id}")
+@router.get("/events/{event_id}", response_model=SuccessEnvelope)
 async def get_event(event_id: UUID, user: CurrentUserDep, db: asyncpg.Connection = Depends(get_db)):
     scope, args = camera_scope(user)
     args.append(event_id)
@@ -56,14 +60,16 @@ async def get_event(event_id: UUID, user: CurrentUserDep, db: asyncpg.Connection
     )
     if row is None:
         raise HTTPException(status_code=404, detail="Analytics event not found")
+    authorize(user, "analytics", "read", owner_id=user.id, resource_id=row["camera_id"])
     return envelope(dict(row))
 
 
-@router.get("/alerts")
+@router.get("/alerts", response_model=PaginatedEnvelope)
 async def list_alerts(
     user: CurrentUserDep, db: asyncpg.Connection = Depends(get_db), page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100), camera_id: UUID | None = None, resolved: bool | None = None,
 ):
+    authorize(user, "analytics", "read", owner_id=user.id, resource_id=camera_id)
     scope, args = camera_scope(user)
     conditions = [scope]
     if camera_id is not None:
@@ -82,11 +88,19 @@ async def list_alerts(
     return envelope({"items": [dict(row) for row in rows], "page": page, "page_size": page_size, "total": total})
 
 
-@router.patch("/alerts/{alert_id}/resolve")
+@router.patch("/alerts/{alert_id}/resolve", response_model=SuccessEnvelope)
 async def resolve_alert(alert_id: UUID, request: Request, user: CurrentUserDep, db: asyncpg.Connection = Depends(get_db)):
     scope, args = camera_scope(user)
     args.append(alert_id)
     async with db.transaction():
+        camera_id = await db.fetchval(
+            f"""SELECT a.camera_id FROM va.intrusion_alerts a JOIN va.cameras c ON c.id=a.camera_id
+                WHERE {scope} AND a.id=${len(args)} FOR UPDATE OF a""",
+            *args,
+        )
+        if camera_id is None:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        authorize(user, "analytics", "resolve", owner_id=user.id, resource_id=camera_id)
         row = await db.fetchrow(
             f"""UPDATE va.intrusion_alerts a SET resolved=true FROM va.cameras c
                 WHERE a.camera_id=c.id AND {scope} AND a.id=${len(args)}
@@ -99,8 +113,9 @@ async def resolve_alert(alert_id: UUID, request: Request, user: CurrentUserDep, 
     return envelope(dict(row))
 
 
-@router.get("/dashboard")
+@router.get("/dashboard", response_model=SuccessEnvelope)
 async def dashboard(user: CurrentUserDep, db: asyncpg.Connection = Depends(get_db)):
+    authorize(user, "analytics", "read", owner_id=user.id)
     scope, args = camera_scope(user)
     start = datetime.combine(datetime.now(UTC).date(), time.min, tzinfo=UTC)
     total_persons = await db.fetchval("SELECT count(*) FROM events.registered_persons")
@@ -116,11 +131,12 @@ async def dashboard(user: CurrentUserDep, db: asyncpg.Connection = Depends(get_d
     })
 
 
-@router.get("/people-count")
+@router.get("/people-count", response_model=SuccessEnvelope)
 async def people_count(
     user: CurrentUserDep, db: asyncpg.Connection = Depends(get_db), camera_id: UUID | None = None,
-    date_from: datetime | None = None, date_to: datetime | None = None,
+    date_from: AwareDatetime | None = None, date_to: AwareDatetime | None = None,
 ):
+    authorize(user, "analytics", "read", owner_id=user.id, resource_id=camera_id)
     scope, args = camera_scope(user)
     conditions = [scope, "e.event_type='people_count'"]
     for column, value in (("e.camera_id", camera_id), ("e.created_at >=", date_from), ("e.created_at <=", date_to)):

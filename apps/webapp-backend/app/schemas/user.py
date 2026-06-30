@@ -7,6 +7,7 @@ from app.schemas.common import EmailString, StrictModel
 
 
 Role = Literal["staff", "va_user"]
+ManageableRole = Literal["admin", "staff", "va_user"]
 
 
 class UserCreate(StrictModel):
@@ -21,7 +22,7 @@ class UserUpdate(StrictModel):
     email: EmailString | None = None
     phone: str | None = Field(default=None, max_length=20)
     whatsapp_number: str | None = Field(default=None, max_length=20)
-    role: Role | None = None
+    role: ManageableRole | None = None
 
     @field_validator("email", "role")
     @classmethod
