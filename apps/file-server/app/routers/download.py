@@ -8,6 +8,7 @@ from app.auth import verify_service_token
 from app.config import Settings, get_settings
 from app.dependencies import get_storage
 from app.minio_client import StorageService
+from app.presigned import clamp_presigned_expiry
 from app.schemas import PresignedUrlResponse
 from app.validation import validate_uuid4
 
@@ -28,8 +29,7 @@ async def get_presigned_url(
     settings: Settings = Depends(get_settings),
 ) -> PresignedUrlResponse:
     file_id = validate_uuid4(file_id)
-    if expires > settings.presigned_url_max_expiry_seconds:
-        expires = settings.presigned_url_max_expiry_seconds
+    expires = clamp_presigned_expiry(settings, expires)
     url = await run_in_threadpool(storage.presigned_url, bucket, file_id, expires)
     return PresignedUrlResponse(file_id=file_id, bucket=bucket, url=url, expires=expires)
 
@@ -39,7 +39,9 @@ async def redirect_to_file(
     bucket: str,
     file_id: UUID,
     storage: StorageService = Depends(get_storage),
+    settings: Settings = Depends(get_settings),
 ) -> RedirectResponse:
     file_id = validate_uuid4(file_id)
-    url = await run_in_threadpool(storage.presigned_url, bucket, file_id, 3600)
+    expiry = clamp_presigned_expiry(settings)
+    url = await run_in_threadpool(storage.presigned_url, bucket, file_id, expiry)
     return RedirectResponse(url=url, status_code=307)

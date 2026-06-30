@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -69,7 +70,8 @@ class BatchDeleteRequest(BaseModel):
 class BatchDeleteFailure(BaseModel):
     bucket: str
     file_id: UUID
-    error: str
+    code: str
+    message: str
 
 
 class BatchDeleteResponse(BaseModel):
@@ -80,3 +82,14 @@ class BatchDeleteResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     minio: str
+
+
+class ErrorDetail(BaseModel):
+    code: str
+    message: str
+    details: Any | None = None
+
+
+class ErrorResponse(BaseModel):
+    success: bool = False
+    error: ErrorDetail

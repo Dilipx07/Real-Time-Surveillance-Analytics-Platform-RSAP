@@ -1,6 +1,8 @@
 from uuid import UUID
 
+import urllib3
 from fastapi import APIRouter, Depends, Query
+from minio.error import S3Error
 from starlette.concurrency import run_in_threadpool
 
 from app.auth import verify_service_token
@@ -63,12 +65,22 @@ async def batch_delete(
             validate_uuid4(reference.file_id)
             await run_in_threadpool(storage.remove, reference.bucket, reference.file_id)
             deleted.append(reference)
-        except (InvalidBucketError, ObjectNotFoundError) as exc:
+        except (InvalidBucketError, ObjectNotFoundError):
             failed.append(
                 BatchDeleteFailure(
                     bucket=reference.bucket,
                     file_id=reference.file_id,
-                    error=str(exc) or exc.__class__.__name__,
+                    code="not_found",
+                    message="Object could not be found",
+                )
+            )
+        except (S3Error, urllib3.exceptions.HTTPError, OSError):
+            failed.append(
+                BatchDeleteFailure(
+                    bucket=reference.bucket,
+                    file_id=reference.file_id,
+                    code="storage_error",
+                    message="Object could not be deleted",
                 )
             )
     return BatchDeleteResponse(deleted=deleted, failed=failed)

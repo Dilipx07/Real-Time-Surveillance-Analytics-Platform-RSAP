@@ -1,4 +1,5 @@
 import io
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID, uuid1, uuid4
@@ -6,9 +7,11 @@ from uuid import UUID, uuid1, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
+from minio.error import S3Error
 
 import main
-from app.minio_client import InvalidBucketError, ObjectNotFoundError
+from app.config import Settings, get_settings
+from app.minio_client import InvalidBucketError, ObjectNotFoundError, StorageUnavailableError
 from app.validation import MAX_UPLOAD_SIZE
 
 
@@ -29,6 +32,8 @@ class FakeStorage:
             minio_bucket_captures="captures",
             minio_bucket_documents="documents",
             buckets=("faces", "captures", "documents"),
+            presigned_url_default_expiry_seconds=3600,
+            presigned_url_max_expiry_seconds=86400,
         )
         self.objects: dict[tuple[str, str], dict] = {}
         self.initialized = False
@@ -43,7 +48,7 @@ class FakeStorage:
 
     def check_health(self) -> None:
         if not self.healthy:
-            raise ConnectionError("MinIO unavailable")
+            raise StorageUnavailableError("MinIO unavailable")
 
     def require_bucket(self, bucket: str) -> None:
         if bucket not in self.settings.buckets:
@@ -120,12 +125,22 @@ def test_health_reports_minio_failure(client: TestClient, storage: FakeStorage) 
     storage.healthy = False
     response = client.get("/health")
     assert response.status_code == 503
-    assert response.json() == {"status": "degraded", "minio": "unavailable"}
+    assert response.json() == {
+        "success": False,
+        "error": {
+            "code": "storage_unavailable",
+            "message": "Object storage is unavailable",
+            "details": None,
+        },
+    }
 
 
 def test_protected_route_rejects_missing_and_wrong_tokens(client: TestClient) -> None:
-    assert client.get("/files/faces").status_code == 401
-    assert client.get("/files/faces", headers={"X-Service-Token": "wrong"}).status_code == 401
+    missing = client.get("/files/faces")
+    wrong = client.get("/files/faces", headers={"X-Service-Token": "wrong"})
+    assert missing.status_code == wrong.status_code == 401
+    assert missing.json()["error"]["code"] == "invalid_service_token"
+    assert wrong.json()["error"]["code"] == "invalid_service_token"
     assert client.get("/docs").status_code == 404
     assert client.get("/openapi.json").status_code == 404
 
@@ -203,6 +218,7 @@ def test_upload_rejects_exactly_ten_mebibytes(client: TestClient) -> None:
         files={"file": ("large.txt", b"a" * MAX_UPLOAD_SIZE, "text/plain")},
     )
     assert response.status_code == 413
+    assert response.json()["error"]["code"] == "file_too_large"
 
 
 def test_presigned_list_delete_and_missing_file(client: TestClient) -> None:
@@ -256,6 +272,213 @@ def test_batch_delete_reports_per_item_results(client: TestClient) -> None:
     assert len(response.json()["failed"]) == 1
 
 
+def test_batch_delete_all_success(client: TestClient) -> None:
+    ids = [
+        client.post(
+            "/upload/face",
+            headers=AUTH_HEADERS,
+            files={"file": (f"{index}.jpg", jpeg_bytes(), "image/jpeg")},
+        ).json()["file_id"]
+        for index in range(2)
+    ]
+    response = client.post(
+        "/files/batch-delete",
+        headers=AUTH_HEADERS,
+        json={"files": [{"bucket": "faces", "file_id": file_id} for file_id in ids]},
+    )
+    assert response.status_code == 200
+    assert len(response.json()["deleted"]) == 2
+    assert response.json()["failed"] == []
+
+
 def test_non_v4_file_id_is_rejected(client: TestClient) -> None:
     response = client.get(f"/files/faces/{uuid1()}/presigned", headers=AUTH_HEADERS)
     assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+
+
+def test_every_face_url_path_obeys_configured_expiry(
+    client: TestClient,
+) -> None:
+    constrained = Settings(
+        minio_internal_endpoint="minio:9000",
+        minio_public_endpoint="s3.test.local",
+        minio_access_key="test-access-key",
+        minio_secret_key="test-secret-key-value",
+        file_server_service_token=TOKEN,
+        presigned_url_max_expiry_seconds=60,
+    )
+    main.app.dependency_overrides[get_settings] = lambda: constrained
+    try:
+        uploaded = client.post(
+            "/upload/face",
+            headers=AUTH_HEADERS,
+            files={"file": ("face.jpg", jpeg_bytes(), "image/jpeg")},
+        )
+        file_id = uploaded.json()["file_id"]
+        redirect = client.get(
+            f"/files/faces/{file_id}", headers=AUTH_HEADERS, follow_redirects=False
+        )
+        explicit = client.get(
+            f"/files/faces/{file_id}/presigned?expires=3600", headers=AUTH_HEADERS
+        )
+    finally:
+        main.app.dependency_overrides.pop(get_settings, None)
+    assert "expires=60" in uploaded.json()["url"]
+    assert "expires=60" in redirect.headers["location"]
+    assert explicit.json()["expires"] == 60
+    assert "expires=60" in explicit.json()["url"]
+
+
+def test_lifespan_closes_storage_when_initialization_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = FakeStorage()
+
+    def fail_initialization() -> None:
+        raise ConnectionError("temporary failure")
+
+    storage.initialize = fail_initialization  # type: ignore[method-assign]
+    monkeypatch.setattr(main, "create_storage", lambda: storage)
+
+    async def enter_lifespan() -> None:
+        async with main.lifespan(main.app):
+            pass
+
+    with pytest.raises(ConnectionError):
+        asyncio.run(enter_lifespan())
+    assert storage.closed
+
+
+def test_unexpected_health_error_is_not_misclassified(
+    client: TestClient,
+    storage: FakeStorage,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def fail() -> None:
+        raise RuntimeError("sensitive diagnostic must not be logged")
+
+    storage.check_health = fail  # type: ignore[method-assign]
+    response = client.get("/health")
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "health_check_failed"
+    assert "RuntimeError" in caplog.text
+    assert "sensitive diagnostic" not in caplog.text
+
+
+def test_error_responses_share_one_schema(client: TestClient) -> None:
+    responses = [
+        client.get("/files/faces"),
+        client.get(f"/files/faces/{uuid4()}", headers=AUTH_HEADERS),
+        client.post(
+            "/upload/face",
+            headers=AUTH_HEADERS,
+            files={"file": ("wrong.png", b"png", "image/png")},
+        ),
+        client.get("/files/faces/not-a-uuid", headers=AUTH_HEADERS),
+    ]
+    assert [response.status_code for response in responses] == [401, 404, 415, 422]
+    for response in responses:
+        assert response.json().keys() == {"success", "error"}
+        assert response.json()["success"] is False
+        assert response.json()["error"].keys() == {"code", "message", "details"}
+
+
+def test_storage_error_is_sanitized_and_standardized(
+    client: TestClient, storage: FakeStorage
+) -> None:
+    def fail_listing(_bucket: str, _page: int, _page_size: int):
+        raise S3Error(
+            "InternalError",
+            "raw storage message",
+            "/private/resource",
+            "request-id",
+            "host-id",
+            None,  # type: ignore[arg-type]
+        )
+
+    storage.list_files = fail_listing  # type: ignore[method-assign]
+    response = client.get("/files/faces", headers=AUTH_HEADERS)
+    assert response.status_code == 502
+    assert response.json() == {
+        "success": False,
+        "error": {
+            "code": "storage_error",
+            "message": "Object storage request failed",
+            "details": None,
+        },
+    }
+    assert "raw storage message" not in response.text
+
+
+def test_batch_delete_continues_after_storage_errors(
+    client: TestClient, storage: FakeStorage
+) -> None:
+    uploads = [
+        client.post(
+            "/upload/face",
+            headers=AUTH_HEADERS,
+            files={"file": (f"{index}.jpg", jpeg_bytes(), "image/jpeg")},
+        ).json()
+        for index in range(3)
+    ]
+    failed_id = UUID(uploads[1]["file_id"])
+    original_remove = storage.remove
+
+    def partly_failing_remove(bucket: str, file_id: UUID) -> None:
+        if file_id == failed_id:
+            raise OSError("raw storage detail")
+        original_remove(bucket, file_id)
+
+    storage.remove = partly_failing_remove  # type: ignore[method-assign]
+    response = client.post(
+        "/files/batch-delete",
+        headers=AUTH_HEADERS,
+        json={
+            "files": [
+                {"bucket": "faces", "file_id": upload["file_id"]}
+                for upload in uploads
+            ]
+        },
+    )
+    assert response.status_code == 200
+    assert len(response.json()["deleted"]) == 2
+    assert response.json()["failed"] == [
+        {
+            "bucket": "faces",
+            "file_id": str(failed_id),
+            "code": "storage_error",
+            "message": "Object could not be deleted",
+        }
+    ]
+    assert "raw storage detail" not in response.text
+
+
+def test_batch_delete_all_failure_and_duplicate_validation(
+    client: TestClient, storage: FakeStorage
+) -> None:
+    storage.remove = lambda _bucket, _file_id: (_ for _ in ()).throw(OSError())  # type: ignore[method-assign]
+    ids = [str(uuid4()), str(uuid4())]
+    failed = client.post(
+        "/files/batch-delete",
+        headers=AUTH_HEADERS,
+        json={"files": [{"bucket": "faces", "file_id": file_id} for file_id in ids]},
+    )
+    duplicate = client.post(
+        "/files/batch-delete",
+        headers=AUTH_HEADERS,
+        json={"files": [{"bucket": "faces", "file_id": ids[0]}] * 2},
+    )
+    assert failed.status_code == 200
+    assert failed.json()["deleted"] == []
+    assert len(failed.json()["failed"]) == 2
+    assert duplicate.status_code == 422
+    assert duplicate.json()["error"]["code"] == "validation_error"
+
+
+def test_openapi_documents_shared_error_schema() -> None:
+    schema = main.app.openapi()
+    operation = schema["paths"]["/files/{bucket}"]["get"]
+    assert operation["responses"]["401"]["content"]["application/json"]["schema"][
+        "$ref"
+    ].endswith("/ErrorResponse")
