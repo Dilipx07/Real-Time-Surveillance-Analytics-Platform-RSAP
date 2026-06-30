@@ -15,7 +15,11 @@ async def create_pool(settings: Settings) -> asyncpg.Pool:
             )
 
     return await asyncpg.create_pool(
-        dsn=settings.postgres_dsn,
+        host=settings.postgres_host,
+        port=settings.postgres_port,
+        database=settings.postgres_db,
+        user=settings.postgres_user,
+        password=settings.postgres_password,
         min_size=1,
         max_size=20,
         command_timeout=30,

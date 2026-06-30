@@ -7,7 +7,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-rsap}
       POSTGRES_USER: ${POSTGRES_USER:-rsap_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_strong_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
@@ -28,7 +28,7 @@ services:
     command: >
       sh -c 'exec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"'
     environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-change_me_strong_redis_password}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     volumes:
       - redis-data:/data
     networks:
@@ -45,8 +45,8 @@ services:
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-change_me_minio_secret}
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY is required}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required}
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -71,19 +71,20 @@ services:
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-rsap}
       POSTGRES_USER: ${POSTGRES_USER:-rsap_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_strong_password}
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-change_me_strong_redis_password}
-      REDIS_URL: redis://:${REDIS_PASSWORD:-change_me_strong_redis_password}@redis:6379/0
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-change_me_minio_secret}
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:?MINIO_PUBLIC_ENDPOINT is required}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY is required}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required}
       MINIO_SECURE: ${MINIO_SECURE:-false}
-      JWT_SECRET: ${JWT_SECRET:-change_me_32_char_minimum_secret_key}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       JWT_ACCESS_EXPIRE_MINUTES: ${JWT_ACCESS_EXPIRE_MINUTES:-15}
       JWT_REFRESH_EXPIRE_DAYS: ${JWT_REFRESH_EXPIRE_DAYS:-7}
-      AES_ENCRYPTION_KEY: ${AES_ENCRYPTION_KEY:-change_me_32_byte_key_exactly_32}
-      LICENSE_SIGNING_SECRET: ${LICENSE_SIGNING_SECRET:-change_me_license_signing_key}
+      AES_ENCRYPTION_KEY: ${AES_ENCRYPTION_KEY:?AES_ENCRYPTION_KEY is required}
+      LICENSE_SIGNING_SECRET: ${LICENSE_SIGNING_SECRET:?LICENSE_SIGNING_SECRET is required}
       APP_ENV: ${APP_ENV:-development}
     ports:
       - "8000:8000"
@@ -93,6 +94,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
         condition: service_healthy
 
   webapp-frontend:
@@ -116,13 +119,13 @@ services:
     restart: unless-stopped
     environment:
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-change_me_minio_secret}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY is required}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required}
       MINIO_BUCKET_FACES: ${MINIO_BUCKET_FACES:-faces}
       MINIO_BUCKET_CAPTURES: ${MINIO_BUCKET_CAPTURES:-captures}
       MINIO_BUCKET_DOCUMENTS: ${MINIO_BUCKET_DOCUMENTS:-documents}
       MINIO_SECURE: ${MINIO_SECURE:-false}
-      FILE_SERVER_SERVICE_TOKEN: ${FILE_SERVER_SERVICE_TOKEN:-change_me_internal_service_token}
+      FILE_SERVER_SERVICE_TOKEN: ${FILE_SERVER_SERVICE_TOKEN:?FILE_SERVER_SERVICE_TOKEN is required}
     ports:
       - "8002:8002"
     networks:

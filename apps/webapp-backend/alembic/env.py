@@ -2,6 +2,7 @@ import asyncio
 from logging.config import fileConfig
 
 from alembic import context
+from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import async_engine_from_config
 from sqlalchemy.pool import NullPool
 
@@ -10,7 +11,18 @@ from app.config import get_settings
 config = context.config
 if config.config_file_name:
     fileConfig(config.config_file_name)
-config.set_main_option("sqlalchemy.url", get_settings().postgres_dsn.replace("postgresql://", "postgresql+asyncpg://", 1))
+settings = get_settings()
+config.set_main_option(
+    "sqlalchemy.url",
+    URL.create(
+        "postgresql+asyncpg",
+        username=settings.postgres_user,
+        password=settings.postgres_password,
+        host=settings.postgres_host,
+        port=settings.postgres_port,
+        database=settings.postgres_db,
+    ).render_as_string(hide_password=False).replace("%", "%%"),
+)
 target_metadata = None
 
 
