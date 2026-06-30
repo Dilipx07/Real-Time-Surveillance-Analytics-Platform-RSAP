@@ -1,19 +1,24 @@
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+import asyncio
 import logging
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import get_settings
 from app.database import create_pool
 from app.redis_client import create_redis
-from app.responses import envelope, error_response
+from app.responses import STANDARD_ERROR_RESPONSES, SuccessEnvelope, envelope, error_response
 from app.routers import analytics, auth, cameras, licenses, persons, sync, users, websockets
 from app.services.file_service import FileService
+from app.services.cleanup_service import external_cleanup_worker
+from app.services.session_service import session_outbox_worker
+from app.services.sync_service import manager
 
 logger = logging.getLogger("rsap.api")
 
@@ -21,16 +26,48 @@ logger = logging.getLogger("rsap.api")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    app.state.db_pool = await create_pool(settings)
-    app.state.redis = create_redis(settings)
-    app.state.file_service = FileService(settings)
+    app.state.settings = settings
+    app.state.logger = logger
+    app.state.shutdown_event = asyncio.Event()
+    app.state.background_tasks = []
+    db_pool = redis = file_service = None
     try:
-        await app.state.redis.ping()
-        await app.state.file_service.create_buckets_if_not_exist()
+        db_pool = app.state.db_pool = await create_pool(settings)
+        redis = app.state.redis = create_redis(settings)
+        file_service = app.state.file_service = FileService(settings)
+        await redis.ping()
+        await file_service.create_buckets_if_not_exist()
+        app.state.background_tasks = [
+            asyncio.create_task(session_outbox_worker(app, app.state.shutdown_event)),
+            asyncio.create_task(external_cleanup_worker(app, app.state.shutdown_event)),
+        ]
         yield
     finally:
-        await app.state.redis.aclose()
-        await app.state.db_pool.close()
+        app.state.shutdown_event.set()
+        tasks = app.state.background_tasks
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await manager.close_all()
+        except Exception:
+            logger.exception("WebSocket shutdown failed")
+        if file_service is not None:
+            try:
+                await file_service.close()
+            except Exception:
+                logger.exception("MinIO client shutdown failed")
+        if redis is not None:
+            try:
+                await redis.aclose()
+            except Exception:
+                logger.exception("Redis shutdown failed")
+        if db_pool is not None:
+            try:
+                await db_pool.close()
+            except Exception:
+                logger.exception("PostgreSQL pool shutdown failed")
 
 
 app = FastAPI(
@@ -38,6 +75,7 @@ app = FastAPI(
     version="1.0.0",
     description="Central API for the Real-Time Surveillance Analytics Platform.",
     lifespan=lifespan,
+    responses=STANDARD_ERROR_RESPONSES,
 )
 
 settings = get_settings()
@@ -50,8 +88,8 @@ app.add_middleware(
 )
 
 
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     return error_response(str(exc.detail), exc.status_code)
 
 
@@ -70,7 +108,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     return error_response("Internal server error", 500)
 
 
-@app.get("/health", tags=["health"])
+@app.get("/health", tags=["health"], response_model=SuccessEnvelope)
 async def health(request: Request):
     checks = {"db": "error", "redis": "error", "minio": "error"}
     try:
