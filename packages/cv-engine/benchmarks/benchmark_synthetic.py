@@ -24,6 +24,7 @@ def rate(label: str, iterations: int, operation: Callable[[], object]) -> None:
 
 
 def main() -> None:
+    print("Synthetic model-free benchmark (not end-to-end inference performance)")
     frame = np.zeros((720, 1280, 3), dtype=np.uint8)
     buffer = FrameBuffer(maxsize=5)
     tracker = Sort(min_hits=1)
