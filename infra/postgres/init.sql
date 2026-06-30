@@ -30,6 +30,17 @@ CREATE TABLE auth.sessions (
     revoked_at TIMESTAMPTZ
 );
 
+CREATE TABLE auth.session_outbox (
+    id BIGSERIAL PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES auth.users(id),
+    operation VARCHAR(20) NOT NULL CHECK (operation IN ('revoke','reconcile')),
+    payload JSONB NOT NULL DEFAULT '{}',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    processed_at TIMESTAMPTZ
+);
+
 CREATE TABLE rbac.licenses (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES auth.users(id),
@@ -60,7 +71,7 @@ CREATE TABLE events.registered_persons (
     event_id UUID,
     full_name VARCHAR(255) NOT NULL,
     phone VARCHAR(20) NOT NULL,
-    aadhaar_last4 CHAR(4) NOT NULL,
+    aadhaar_last4 TEXT NOT NULL,
     face_encoding BYTEA,
     face_image_id UUID,
     registered_by UUID REFERENCES auth.users(id),
@@ -115,9 +126,23 @@ CREATE TABLE audit.logs (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE audit.external_cleanup_outbox (
+    id BIGSERIAL PRIMARY KEY,
+    bucket VARCHAR(255) NOT NULL,
+    object_name TEXT NOT NULL,
+    operation VARCHAR(20) NOT NULL DEFAULT 'delete' CHECK (operation = 'delete'),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    processed_at TIMESTAMPTZ,
+    UNIQUE(bucket, object_name, operation)
+);
+
 CREATE INDEX idx_sessions_user ON auth.sessions(user_id);
 CREATE INDEX idx_sessions_token ON auth.sessions(session_token);
+CREATE INDEX idx_session_outbox_pending ON auth.session_outbox(id) WHERE processed_at IS NULL;
 CREATE INDEX idx_licenses_user ON rbac.licenses(user_id);
 CREATE INDEX idx_analytics_camera ON va.analytics_events(camera_id);
 CREATE INDEX idx_analytics_created ON va.analytics_events(created_at DESC);
 CREATE INDEX idx_persons_event ON events.registered_persons(event_id);
+CREATE INDEX idx_external_cleanup_pending ON audit.external_cleanup_outbox(id) WHERE processed_at IS NULL;
