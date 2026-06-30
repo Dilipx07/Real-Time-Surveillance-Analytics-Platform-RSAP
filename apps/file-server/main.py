@@ -119,6 +119,24 @@ async def validation_error_handler(
     )
 
 
+@app.exception_handler(Exception)
+async def unexpected_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    route = getattr(request.scope.get("route"), "path", "unknown")
+    sanitized_error = RuntimeError(f"Unhandled {type(exc).__name__}")
+    logger.error(
+        "Unhandled request failure method=%s route=%s exception_type=%s",
+        request.method,
+        route,
+        type(exc).__name__,
+        exc_info=(RuntimeError, sanitized_error, exc.__traceback__),
+    )
+    return error_response(
+        status.HTTP_500_INTERNAL_SERVER_ERROR,
+        "internal_error",
+        "Internal server error",
+    )
+
+
 @app.get("/health", response_model=HealthResponse, tags=["health"])
 async def health(request: Request) -> HealthResponse | JSONResponse:
     storage: StorageService = request.app.state.storage
