@@ -26,20 +26,28 @@ async def test_postgres_password_is_passed_without_dsn_interpolation(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_presigned_urls_use_public_endpoint(monkeypatch):
+@pytest.mark.parametrize("public_secure,scheme", [(False, "http"), (True, "https")])
+async def test_presigned_urls_support_public_http_and_https(
+    monkeypatch, public_secure, scheme
+):
+    class FakeMinio:
+        def __init__(self, endpoint, **kwargs):
+            self.endpoint = endpoint
+            self.secure = kwargs["secure"]
+
+        def presigned_get_object(self, bucket, object_name, **_kwargs):
+            return f"{'https' if self.secure else 'http'}://{self.endpoint}/{bucket}/{object_name}"
+
+    monkeypatch.setattr("app.services.file_service.Minio", FakeMinio)
     settings = SimpleNamespace(
         minio_endpoint="minio:9000", minio_public_endpoint="files.example.test",
         minio_access_key="access", minio_secret_key="secret", minio_secure=False,
-        minio_public_secure=True, minio_bucket_faces="faces",
+        minio_public_secure=public_secure, minio_bucket_faces="faces",
         minio_bucket_captures="captures", minio_bucket_documents="documents",
     )
     service = FileService(settings)
-    monkeypatch.setattr(
-        service.public_client, "presigned_get_object",
-        lambda *_args, **_kwargs: "https://files.example.test/faces/example.jpg",
-    )
     url = await service.get_presigned_url("faces", "example.jpg")
-    assert "files.example.test" in url
+    assert url == f"{scheme}://files.example.test/faces/example.jpg"
     assert "minio:9000" not in url
 
 
