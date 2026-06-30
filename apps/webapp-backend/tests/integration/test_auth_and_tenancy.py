@@ -1,11 +1,13 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+import json
 import os
 from uuid import uuid4
 
 import asyncpg
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from redis import Redis
 from starlette.websockets import WebSocketDisconnect
@@ -87,6 +89,96 @@ def headers(tokens: dict, access_key: str = "access_token") -> dict[str, str]:
         "Authorization": f"Bearer {tokens[access_key]}",
         "X-Session-Token": tokens["session_token"],
     }
+
+
+async def run_super_admin_race(first_operation: str, second_operation: str):
+    admin_id, _, _, _ = await reset_and_seed()
+    connection = await asyncpg.connect(
+        host="127.0.0.1", port=55432, database="rsap_test", user="rsap_test",
+        password="integration-postgres-password",
+    )
+    try:
+        from app.security import hash_password
+
+        second_id = await connection.fetchval(
+            """INSERT INTO auth.users(email,password_hash,role)
+               VALUES('second-root@example.com',$1,'super_admin') RETURNING id""",
+            hash_password("integration-password"),
+        )
+        now = datetime.now(UTC)
+        await connection.execute(
+            """INSERT INTO rbac.licenses(user_id,license_key,valid_from,valid_until,created_by)
+               VALUES($1,$2,$3,$4,$5)""",
+            second_id, str(uuid4()), now - timedelta(minutes=1),
+            now + timedelta(hours=1), admin_id,
+        )
+    finally:
+        await connection.close()
+
+    start = asyncio.Event()
+
+    async def mutate(target_id, operation):
+        from app.services.rbac_service import (
+            protect_last_super_admin,
+            serialize_super_admin_mutation,
+        )
+
+        db = await asyncpg.connect(
+            host="127.0.0.1", port=55432, database="rsap_test", user="rsap_test",
+            password="integration-postgres-password",
+        )
+        try:
+            await start.wait()
+            try:
+                async with db.transaction():
+                    await serialize_super_admin_mutation(db)
+                    target = await db.fetchrow(
+                        "SELECT role FROM auth.users WHERE id=$1 FOR UPDATE", target_id
+                    )
+                    await protect_last_super_admin(db, target_id, target["role"])
+                    if operation == "delete":
+                        await db.execute(
+                            "UPDATE auth.users SET is_deleted=true,is_active=false WHERE id=$1",
+                            target_id,
+                        )
+                    elif operation == "disable":
+                        await db.execute(
+                            "UPDATE auth.users SET is_active=false WHERE id=$1", target_id
+                        )
+                    else:
+                        await db.execute(
+                            "UPDATE auth.users SET role='admin' WHERE id=$1", target_id
+                        )
+                return 200
+            except HTTPException as exc:
+                return exc.status_code
+        finally:
+            await db.close()
+
+    tasks = [
+        asyncio.create_task(mutate(second_id, first_operation)),
+        asyncio.create_task(mutate(admin_id, second_operation)),
+    ]
+    await asyncio.sleep(0)
+    start.set()
+    statuses = await asyncio.gather(*tasks)
+
+    check = await asyncpg.connect(
+        host="127.0.0.1", port=55432, database="rsap_test", user="rsap_test",
+        password="integration-postgres-password",
+    )
+    try:
+        remaining = await check.fetchval(
+            """SELECT count(*) FROM auth.users u
+               WHERE role='super_admin' AND is_active=true AND is_deleted=false
+                 AND EXISTS (
+                   SELECT 1 FROM rbac.licenses l WHERE l.user_id=u.id
+                     AND l.is_active=true AND l.valid_from <= NOW() AND l.valid_until > NOW()
+                 )"""
+        )
+    finally:
+        await check.close()
+    return statuses, remaining
 
 
 @pytest.fixture
@@ -214,7 +306,34 @@ def test_license_shortening_future_license_force_expiry_and_websocket_revocation
         )
         assert shortened.status_code == 200, shortened.text
         redis = Redis.from_url("redis://:integration-redis-password@127.0.0.1:56379/0")
-        assert 0 < redis.ttl(f"session:{va_id}") <= 30
+        short_session_ttl = redis.ttl(f"session:{va_id}")
+        short_refresh_ttl = redis.ttl(f"refresh:{va_id}")
+        assert 0 < short_session_ttl <= 30
+        assert 0 < short_refresh_ttl <= 30
+
+        extended_until = datetime.now(UTC) + timedelta(minutes=5)
+        extended = client.patch(
+            f"/api/v1/licenses/{licenses[va_id]}", headers=headers(admin),
+            json={"valid_until": extended_until.isoformat()},
+        )
+        assert extended.status_code == 200, extended.text
+        extended_session_ttl = redis.ttl(f"session:{va_id}")
+        extended_refresh_ttl = redis.ttl(f"refresh:{va_id}")
+        assert extended_session_ttl > short_session_ttl + 240
+        assert extended_refresh_ttl > short_refresh_ttl + 240
+        print(
+            "redis_ttls",
+            {
+                "before": [short_session_ttl, short_refresh_ttl],
+                "after": [extended_session_ttl, extended_refresh_ttl],
+            },
+        )
+        session_metadata = json.loads(redis.get(f"session:{va_id}"))
+        refresh_metadata = json.loads(redis.get(f"refresh:{va_id}"))
+        assert session_metadata["sid"] == refresh_metadata["sid"]
+        now_epoch = int(datetime.now(UTC).timestamp())
+        assert extended_session_ttl <= session_metadata["session_expires_at"] - now_epoch + 1
+        assert extended_refresh_ttl <= refresh_metadata["refresh_expires_at"] - now_epoch + 1
 
         with client.websocket_connect(f"/ws/sync/{va_id}?session_token={va['session_token']}") as socket:
             assert socket.receive_json()["type"] == "config_update"
@@ -284,3 +403,19 @@ def test_stale_desktop_alert_cannot_reopen_resolved_alert(seeded):
             await connection.close()
 
     assert asyncio.run(resolved_value()) is True
+
+
+@pytest.mark.parametrize(
+    ("first_operation", "second_operation"),
+    [("delete", "delete"), ("disable", "disable"), ("delete", "demote")],
+)
+def test_concurrent_super_admin_reductions_preserve_one_operator(
+    first_operation, second_operation
+):
+    statuses, remaining = asyncio.run(
+        run_super_admin_race(first_operation, second_operation)
+    )
+    print("super_admin_race", first_operation, second_operation, statuses, remaining)
+    assert statuses.count(200) <= 1
+    assert 409 in statuses
+    assert remaining >= 1
