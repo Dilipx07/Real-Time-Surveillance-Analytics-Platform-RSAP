@@ -9,7 +9,11 @@ from app.middleware.audit import write_audit_log
 from app.responses import PaginatedEnvelope, SuccessEnvelope, envelope
 from app.schemas.user import PermissionCreate, UserCreate, UserUpdate
 from app.security import hash_password
-from app.services.rbac_service import assert_can_manage_target, protect_last_super_admin
+from app.services.rbac_service import (
+    assert_can_manage_target,
+    protect_last_super_admin,
+    serialize_super_admin_mutation,
+)
 from app.services.session_service import enqueue_session_action, process_session_outbox_once
 
 router = APIRouter()
@@ -80,6 +84,8 @@ async def update_user(payload: UserUpdate, user_id: UUID, request: Request, admi
     args.append(user_id)
     try:
         async with db.transaction():
+            if "role" in values:
+                await serialize_super_admin_mutation(db)
             target = await db.fetchrow(
                 "SELECT role FROM auth.users WHERE id=$1 AND is_deleted=false FOR UPDATE", user_id
             )
@@ -107,6 +113,7 @@ async def delete_user(user_id: UUID, request: Request, admin: AdminUserDep, db: 
     if user_id == admin.id:
         raise HTTPException(status_code=400, detail="You cannot delete your own account")
     async with db.transaction():
+        await serialize_super_admin_mutation(db)
         target = await db.fetchrow(
             "SELECT role FROM auth.users WHERE id=$1 AND is_deleted=false FOR UPDATE", user_id
         )
@@ -132,6 +139,7 @@ async def toggle_active(user_id: UUID, request: Request, admin: AdminUserDep, db
     if user_id == admin.id:
         raise HTTPException(status_code=400, detail="You cannot disable your own account")
     async with db.transaction():
+        await serialize_super_admin_mutation(db)
         target = await db.fetchrow(
             "SELECT role, is_active FROM auth.users WHERE id=$1 AND is_deleted=false FOR UPDATE",
             user_id,

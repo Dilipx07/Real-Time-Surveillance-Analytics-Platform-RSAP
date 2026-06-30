@@ -8,7 +8,11 @@ from app.middleware.audit import write_audit_log
 from app.responses import PaginatedEnvelope, SuccessEnvelope, envelope
 from app.schemas.license import LicenseCreate, LicenseUpdate
 from app.services.license_service import generate_license_key
-from app.services.rbac_service import assert_can_manage_target, protect_last_super_admin
+from app.services.rbac_service import (
+    assert_can_manage_target,
+    protect_last_super_admin,
+    serialize_super_admin_mutation,
+)
 from app.services.session_service import enqueue_session_action, process_session_outbox_once
 
 router = APIRouter()
@@ -78,8 +82,9 @@ async def update_license(payload: LicenseUpdate, license_id: UUID, request: Requ
         assignments.append(f"{key}=${len(args)}{cast}")
     args.append(license_id)
     async with db.transaction():
+        await serialize_super_admin_mutation(db)
         current = await db.fetchrow(
-            """SELECT l.user_id, l.valid_from, l.valid_until, u.role
+            """SELECT l.user_id, l.valid_from, l.valid_until, l.is_active, u.role
                FROM rbac.licenses l JOIN auth.users u ON u.id=l.user_id
                WHERE l.id=$1 FOR UPDATE OF l, u""",
             license_id,
@@ -91,6 +96,19 @@ async def update_license(payload: LicenseUpdate, license_id: UUID, request: Requ
         valid_until = values.get("valid_until", current["valid_until"])
         if valid_until <= valid_from:
             raise HTTPException(status_code=422, detail="valid_until must be after valid_from")
+        remains_active = await db.fetchval(
+            "SELECT $1::boolean AND $2::timestamptz <= NOW() AND $3::timestamptz > NOW()",
+            values.get("is_active", current["is_active"]),
+            valid_from,
+            valid_until,
+        )
+        if not remains_active:
+            await protect_last_super_admin(
+                db,
+                current["user_id"],
+                current["role"],
+                excluded_license_id=license_id,
+            )
         row = await db.fetchrow(
             f"UPDATE rbac.licenses SET {', '.join(assignments)}, updated_at=NOW() WHERE id=${len(args)} RETURNING {LICENSE_COLUMNS}",
             *args,
@@ -104,6 +122,7 @@ async def update_license(payload: LicenseUpdate, license_id: UUID, request: Requ
 @router.delete("/{license_id}/expire", response_model=SuccessEnvelope)
 async def expire_license(license_id: UUID, request: Request, admin: AdminUserDep, db: asyncpg.Connection = Depends(get_db)):
     async with db.transaction():
+        await serialize_super_admin_mutation(db)
         target = await db.fetchrow(
             """SELECT u.id, u.role FROM rbac.licenses l JOIN auth.users u ON u.id=l.user_id
                WHERE l.id=$1 FOR UPDATE OF l, u""",
@@ -112,7 +131,9 @@ async def expire_license(license_id: UUID, request: Request, admin: AdminUserDep
         if target is None:
             raise HTTPException(status_code=404, detail="License not found")
         assert_can_manage_target(admin, target["role"])
-        await protect_last_super_admin(db, target["id"], target["role"])
+        await protect_last_super_admin(
+            db, target["id"], target["role"], excluded_license_id=license_id
+        )
         row = await db.fetchrow(
             f"UPDATE rbac.licenses SET valid_until=NOW(), is_active=false, updated_at=NOW() WHERE id=$1 RETURNING {LICENSE_COLUMNS}",
             license_id,

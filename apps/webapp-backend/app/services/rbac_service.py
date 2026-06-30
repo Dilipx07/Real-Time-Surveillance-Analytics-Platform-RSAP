@@ -13,6 +13,11 @@ ROLE_RESOURCES: dict[str, set[str]] = {
     "va_user": {"cameras", "analytics", "sync"},
 }
 
+# ASCII "RSAPSADM" encoded as one signed-bigint-safe PostgreSQL advisory key.
+# Every transaction that can reduce the operational super-admin set takes this
+# lock before locking its target row or counting the remaining administrators.
+SUPER_ADMIN_INVARIANT_LOCK_KEY = 5932156947427050573
+
 
 def matching_permission(user: CurrentUser, resource: str, action: str) -> dict | None:
     for permission in user.permissions:
@@ -64,12 +69,64 @@ def assert_can_manage_target(actor: CurrentUser, target_role: str) -> None:
         raise HTTPException(status_code=403, detail="Cannot manage a higher-privileged account")
 
 
-async def protect_last_super_admin(db, target_id: UUID, target_role: str) -> None:
+async def serialize_super_admin_mutation(db) -> None:
+    await db.execute(
+        "SELECT pg_advisory_xact_lock($1)", SUPER_ADMIN_INVARIANT_LOCK_KEY
+    )
+
+
+async def protect_last_super_admin(
+    db,
+    target_id: UUID,
+    target_role: str,
+    *,
+    excluded_license_id: UUID | None = None,
+) -> None:
+    """Reject a mutation that removes the final operational super-admin.
+
+    Operational means an active, non-deleted super-admin with at least one
+    active licence whose validity window contains the database clock. Callers
+    hold ``SUPER_ADMIN_INVARIANT_LOCK_KEY`` and the target row before calling.
+    ``excluded_license_id`` models that licence after an expiry/deactivation.
+    """
     if target_role != "super_admin":
         return
+    currently_operational = await db.fetchval(
+        """SELECT EXISTS(
+               SELECT 1 FROM auth.users u
+               WHERE u.id=$1 AND u.role='super_admin'
+                 AND u.is_active=true AND u.is_deleted=false
+                 AND EXISTS (
+                   SELECT 1 FROM rbac.licenses l
+                   WHERE l.user_id=u.id AND l.is_active=true
+                     AND l.valid_from <= NOW() AND l.valid_until > NOW()
+                 )
+             )""",
+        target_id,
+    )
+    if not currently_operational:
+        return
+    if excluded_license_id is not None:
+        remains_operational = await db.fetchval(
+            """SELECT EXISTS(
+                   SELECT 1 FROM rbac.licenses
+                   WHERE user_id=$1 AND id<>$2 AND is_active=true
+                     AND valid_from <= NOW() AND valid_until > NOW()
+                 )""",
+            target_id,
+            excluded_license_id,
+        )
+        if remains_operational:
+            return
     remaining = await db.fetchval(
-        """SELECT count(*) FROM auth.users
-           WHERE role='super_admin' AND is_active=true AND is_deleted=false AND id<>$1""",
+        """SELECT count(*) FROM auth.users u
+           WHERE u.role='super_admin' AND u.is_active=true
+             AND u.is_deleted=false AND u.id<>$1
+             AND EXISTS (
+               SELECT 1 FROM rbac.licenses l
+               WHERE l.user_id=u.id AND l.is_active=true
+                 AND l.valid_from <= NOW() AND l.valid_until > NOW()
+             )""",
         target_id,
     )
     if remaining == 0:
