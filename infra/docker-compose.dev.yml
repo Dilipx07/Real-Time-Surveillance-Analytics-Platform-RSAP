@@ -19,6 +19,7 @@ services:
     ports:
       - "8002:8002"
     environment:
+      APP_ENV: development
       MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-localhost:9000}
       MINIO_PUBLIC_SECURE: "false"
 
