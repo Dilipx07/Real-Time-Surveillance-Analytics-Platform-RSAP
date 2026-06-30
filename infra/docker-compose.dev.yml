@@ -16,6 +16,16 @@ services:
     volumes:
       - ../apps/file-server:/app
     command: uvicorn main:app --host 0.0.0.0 --port 8002 --reload
+    ports:
+      - "8002:8002"
+    environment:
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-localhost:9000}
+      MINIO_PUBLIC_SECURE: "false"
+
+  minio:
+    ports:
+      - "9000:9000"
+      - "9001:9001"
 
 volumes:
   webapp-frontend-node-modules:

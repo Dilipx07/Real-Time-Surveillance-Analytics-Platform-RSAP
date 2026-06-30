@@ -37,9 +37,10 @@ class FakeMinioClient:
 
 def make_settings() -> Settings:
     return Settings(
-        minio_endpoint="minio:9000",
+        minio_internal_endpoint="minio:9000",
+        minio_public_endpoint="s3.test.local",
         minio_access_key="access-key",
-        minio_secret_key="secret-key",
+        minio_secret_key="secret-key-value",
         file_server_service_token="a-secure-service-token",
     )
 
@@ -47,7 +48,9 @@ def make_settings() -> Settings:
 def test_initialize_creates_missing_private_buckets_and_capture_lifecycle() -> None:
     client = FakeMinioClient()
     http_client = FakeHttpClient()
-    storage = StorageService(make_settings(), client, http_client)  # type: ignore[arg-type]
+    storage = StorageService(
+        make_settings(), client, client, http_client  # type: ignore[arg-type]
+    )
 
     storage.initialize()
 

@@ -19,12 +19,23 @@ class InvalidBucketError(Exception):
     """Raised when a request names a bucket outside this service's ownership."""
 
 
+class StorageUnavailableError(Exception):
+    """Raised when MinIO cannot answer a health probe."""
+
+
 class StorageService:
     """Synchronous MinIO operations, called from FastAPI worker threads."""
 
-    def __init__(self, settings: Settings, client: Minio, http_client: urllib3.PoolManager) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: Minio,
+        signing_client: Minio,
+        http_client: urllib3.PoolManager,
+    ) -> None:
         self.settings = settings
         self.client = client
+        self.signing_client = signing_client
         self._http_client = http_client
 
     @classmethod
@@ -38,13 +49,27 @@ class StorageService:
             ),
         )
         client = Minio(
-            endpoint=settings.minio_endpoint,
+            endpoint=settings.minio_internal_endpoint,
             access_key=settings.minio_access_key,
             secret_key=settings.minio_secret_key,
-            secure=settings.minio_secure,
+            secure=settings.minio_internal_secure,
+            region=settings.minio_region,
             http_client=http_client,
         )
-        return cls(settings=settings, client=client, http_client=http_client)
+        signing_client = Minio(
+            endpoint=settings.minio_public_endpoint,
+            access_key=settings.minio_access_key,
+            secret_key=settings.minio_secret_key,
+            secure=settings.minio_public_secure,
+            region=settings.minio_region,
+            http_client=http_client,
+        )
+        return cls(
+            settings=settings,
+            client=client,
+            signing_client=signing_client,
+            http_client=http_client,
+        )
 
     def initialize(self) -> None:
         for bucket in self.settings.buckets:
@@ -56,7 +81,10 @@ class StorageService:
         self._http_client.clear()
 
     def check_health(self) -> None:
-        self.client.list_buckets()
+        try:
+            self.client.list_buckets()
+        except (S3Error, urllib3.exceptions.HTTPError, OSError) as exc:
+            raise StorageUnavailableError("MinIO health probe failed") from exc
 
     def upload(
         self,
@@ -76,7 +104,7 @@ class StorageService:
 
     def presigned_url(self, bucket: str, file_id: UUID, expires: int) -> str:
         object_name = self.resolve_object_name(bucket, file_id)
-        return self.client.presigned_get_object(
+        return self.signing_client.presigned_get_object(
             bucket_name=bucket,
             object_name=object_name,
             expires=timedelta(seconds=expires),
