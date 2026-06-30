@@ -1,0 +1,43 @@
+name: rsap-backend-integration
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: rsap_test
+      POSTGRES_USER: rsap_test
+      POSTGRES_PASSWORD: integration-postgres-password
+    ports:
+      - "55432:5432"
+    volumes:
+      - ../../../../infra/postgres/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rsap_test -d rsap_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass integration-redis-password
+    ports:
+      - "56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "integration-redis-password", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  minio:
+    image: minio/minio:latest
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: integration-access
+      MINIO_ROOT_PASSWORD: integration-minio-secret
+    ports:
+      - "59000:9000"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 2s
+      retries: 30

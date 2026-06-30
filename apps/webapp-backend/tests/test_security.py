@@ -23,7 +23,15 @@ def test_password_hash_and_verification():
 
 
 def test_jwt_type_is_enforced():
-    access = create_token("48ef73b8-02c3-48cd-b8f1-251dcf5199ce", "access", timedelta(minutes=5))
-    assert decode_token(access)["type"] == "access"
+    access, jti = create_token(
+        "48ef73b8-02c3-48cd-b8f1-251dcf5199ce",
+        "access",
+        timedelta(minutes=5),
+        "session-id",
+    )
+    claims = decode_token(access)
+    assert claims["type"] == "access"
+    assert claims["sid"] == "session-id"
+    assert claims["jti"] == jti
     with pytest.raises(JWTError):
         decode_token(access, expected_type="refresh")

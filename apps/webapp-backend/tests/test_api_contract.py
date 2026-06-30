@@ -8,7 +8,6 @@ def test_all_protected_http_operations_expose_dual_token_contract():
     schema = app.openapi()
     exemptions = {
         ("/api/v1/auth/login", "post"),
-        ("/api/v1/licenses/{license_id}/verify", "get"),
         ("/health", "get"),
     }
     for path, path_item in schema["paths"].items():
@@ -47,3 +46,29 @@ def test_openapi_contains_required_api_groups():
         "/api/v1/persons/", "/api/v1/analytics/events", "/api/v1/sync/events",
     }
     assert expected.issubset(paths)
+
+
+def test_not_found_and_method_not_allowed_use_error_envelope():
+    client = TestClient(app)
+    for response in (
+        client.get("/definitely-not-a-route"),
+        client.put("/api/v1/auth/login", json={}),
+    ):
+        assert response.status_code in {404, 405}
+        assert response.json().keys() == {"success", "data", "error"}
+        assert response.json()["success"] is False
+
+
+def test_openapi_documents_envelopes_errors_headers_and_csv():
+    schema = app.openapi()
+    login = schema["paths"]["/api/v1/auth/login"]["post"]
+    assert login["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/AuthenticationEnvelope"
+    )
+    users = schema["paths"]["/api/v1/users/"]["get"]
+    assert users["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/PaginatedEnvelope"
+    )
+    for code in ("401", "403", "404", "409"):
+        assert code in users["responses"]
+    assert "text/csv" in schema["paths"]["/api/v1/persons/export"]["get"]["responses"]["200"]["content"]
