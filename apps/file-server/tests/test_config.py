@@ -51,7 +51,14 @@ def test_placeholder_credentials_are_rejected(field: str, value: str) -> None:
 
 @pytest.mark.parametrize(
     "endpoint",
-    ["https://s3.example.test", "host/path", "user@host:9000", "host:99999"],
+    [
+        "https://s3.example.test",
+        "host/path",
+        "user@host:9000",
+        "host:99999",
+        "bad host:9000",
+        "-bad.example:9000",
+    ],
 )
 def test_invalid_endpoints_are_rejected(endpoint: str) -> None:
     with pytest.raises(ValidationError):

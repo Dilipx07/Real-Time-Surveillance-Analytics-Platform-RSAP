@@ -1,10 +1,14 @@
 import ipaddress
+import re
 from functools import lru_cache
 from typing import Self
 from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+DNS_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 
 
 class Settings(BaseSettings):
@@ -64,8 +68,9 @@ class Settings(BaseSettings):
             port = parsed.port
         except ValueError as exc:
             raise ValueError("endpoint contains an invalid port") from exc
+        hostname = parsed.hostname
         if (
-            not parsed.hostname
+            not hostname
             or parsed.username is not None
             or parsed.password is not None
             or parsed.path
@@ -75,6 +80,14 @@ class Settings(BaseSettings):
             raise ValueError("endpoint must contain only a host and optional port")
         if port is not None and not 1 <= port <= 65535:
             raise ValueError("endpoint port must be between 1 and 65535")
+        try:
+            ipaddress.ip_address(hostname)
+        except ValueError:
+            labels = hostname.rstrip(".").split(".")
+            if len(hostname) > 253 or any(
+                not DNS_LABEL_PATTERN.fullmatch(label) for label in labels
+            ):
+                raise ValueError("endpoint contains an invalid hostname")
         return value
 
     @field_validator(
