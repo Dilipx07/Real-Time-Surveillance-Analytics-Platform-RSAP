@@ -15,4 +15,6 @@ COPY . .
 
 EXPOSE 8000
 
+# WebSocket connection ownership is process-local, so this service intentionally
+# runs one worker. Scale only after replacing the registry with shared coordination.
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
