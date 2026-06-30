@@ -76,3 +76,9 @@ def test_missing_required_credentials_are_rejected(monkeypatch: pytest.MonkeyPat
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+@pytest.mark.parametrize("public_endpoint", ["minio:9000", "minio"])
+def test_public_endpoint_cannot_use_internal_docker_dns(public_endpoint: str) -> None:
+    with pytest.raises(ValidationError):
+        Settings(**(BASE_SETTINGS | {"minio_public_endpoint": public_endpoint}))

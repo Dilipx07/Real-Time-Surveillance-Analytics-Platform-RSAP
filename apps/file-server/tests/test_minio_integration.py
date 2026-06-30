@@ -99,7 +99,7 @@ def minio_server():
 @pytest.fixture
 def real_client(monkeypatch: pytest.MonkeyPatch, minio_server: MinioTestServer):
     settings = Settings(
-        minio_internal_endpoint=minio_server.endpoint,
+        minio_internal_endpoint=minio_server.endpoint.replace("127.0.0.1", "localhost"),
         minio_public_endpoint=minio_server.endpoint,
         minio_access_key=minio_server.access_key,
         minio_secret_key=minio_server.secret_key,

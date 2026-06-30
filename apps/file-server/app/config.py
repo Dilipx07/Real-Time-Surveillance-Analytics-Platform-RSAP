@@ -123,6 +123,15 @@ class Settings(BaseSettings):
         }
         if len(buckets) != 3:
             raise ValueError("MinIO bucket names must be distinct")
+        public_host = urlsplit(f"//{self.minio_public_endpoint}").hostname
+        if (
+            self.minio_public_endpoint.casefold()
+            == self.minio_internal_endpoint.casefold()
+            or (public_host and public_host.casefold() == "minio")
+        ):
+            raise ValueError(
+                "public MinIO endpoint must not use the internal Docker endpoint"
+            )
         if self.presigned_url_default_expiry_seconds < 60:
             raise ValueError("default presigned expiry must be at least 60 seconds")
         return self
