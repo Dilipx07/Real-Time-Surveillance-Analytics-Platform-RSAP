@@ -24,7 +24,7 @@ setup(
     extras_require={
         "yolo": ["ultralytics>=8.2,<9"],
         "face": ["face-recognition>=1.3,<2"],
-        "test": ["pytest>=8,<9"],
+        "test": ["pytest>=8,<9", "pytest-asyncio>=0.24,<1"],
         "all": ["ultralytics>=8.2,<9", "face-recognition>=1.3,<2"],
     },
 )

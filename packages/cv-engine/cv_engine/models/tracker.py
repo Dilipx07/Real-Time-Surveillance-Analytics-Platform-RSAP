@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from ..types import Detection, TrackedObject
+from ..types import Detection, TrackedObject, validate_bbox
 
 
 def iou_batch(boxes_a: np.ndarray, boxes_b: np.ndarray) -> np.ndarray:
@@ -27,9 +27,10 @@ def iou_batch(boxes_a: np.ndarray, boxes_b: np.ndarray) -> np.ndarray:
 
 
 def _bbox_to_measurement(bbox: np.ndarray) -> np.ndarray:
-    width = max(float(bbox[2] - bbox[0]), 1e-6)
-    height = max(float(bbox[3] - bbox[1]), 1e-6)
-    return np.array([bbox[0] + width / 2, bbox[1] + height / 2, width * height, width / height], dtype=float)
+    x1, y1, x2, y2 = validate_bbox(bbox)
+    width = x2 - x1
+    height = y2 - y1
+    return np.array([x1 + width / 2, y1 + height / 2, width * height, width / height], dtype=float)
 
 
 def _state_to_bbox(state: np.ndarray) -> np.ndarray:
@@ -134,8 +135,12 @@ class Sort:
         array = np.asarray(detections, dtype=float)
         if array.size == 0:
             array = np.empty((0, 5), dtype=float)
-        if array.ndim != 2 or array.shape[1] < 4:
-            raise ValueError("detections must have shape (N, >=4)")
+        if array.ndim != 2 or array.shape[1] not in (4, 5):
+            raise ValueError("detections must have shape (N, 4) or (N, 5)")
+        for row in array:
+            validate_bbox(row[:4])
+            if len(row) == 5 and (not np.isfinite(row[4]) or not 0.0 <= row[4] <= 1.0):
+                raise ValueError("detection confidence must be finite and between 0 and 1")
         tracked = self._update(array[:, :4], [_TrackMetadata(confidence=float(row[4]) if len(row) > 4 else 1.0) for row in array])
         return np.asarray([[*item.bbox, float(item.track_id)] for item in tracked], dtype=float).reshape(-1, 5)
 

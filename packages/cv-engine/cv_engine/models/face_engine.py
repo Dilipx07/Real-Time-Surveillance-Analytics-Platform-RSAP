@@ -26,10 +26,18 @@ class KnownFace:
 class FaceEngine:
     """Recognize faces in person crops while reusing one known-encoding index."""
 
-    def __init__(self, tolerance: float = 0.6, backend: Any | None = None) -> None:
+    def __init__(
+        self,
+        tolerance: float = 0.6,
+        backend: Any | None = None,
+        encoding_dimension: int = 128,
+    ) -> None:
         if not 0.0 < tolerance <= 1.0:
             raise ValueError("tolerance must be between 0 and 1")
         self.tolerance = tolerance
+        if encoding_dimension < 1:
+            raise ValueError("encoding_dimension must be positive")
+        self.encoding_dimension = encoding_dimension
         self._backend = backend
         self._known: tuple[KnownFace, ...] = ()
         self._lock = threading.RLock()
@@ -49,8 +57,7 @@ class FaceEngine:
         checked: list[KnownFace] = []
         for face in faces:
             encoding = np.asarray(face.encoding, dtype=np.float64)
-            if encoding.ndim != 1:
-                raise ValueError("face encodings must be one-dimensional")
+            self._validate_encoding(encoding)
             checked.append(KnownFace(face.person_id, face.name, encoding.copy()))
         with self._lock:
             self._known = tuple(checked)
@@ -60,7 +67,9 @@ class FaceEngine:
         encodings = self.backend.face_encodings(rgb)
         if len(encodings) != 1:
             raise ValueError(f"enrollment image must contain exactly one face; found {len(encodings)}")
-        face = KnownFace(person_id, name, np.asarray(encodings[0], dtype=np.float64))
+        encoding = np.asarray(encodings[0], dtype=np.float64)
+        self._validate_encoding(encoding)
+        face = KnownFace(person_id, name, encoding)
         with self._lock:
             self._known = (*self._known, face)
         return face
@@ -81,6 +90,8 @@ class FaceEngine:
             locations = self.backend.face_locations(crop)
             encodings = self.backend.face_encodings(crop, locations)
             for location, encoding in zip(locations, encodings, strict=True):
+                encoding = np.asarray(encoding, dtype=np.float64)
+                self._validate_encoding(encoding)
                 top, right, bottom, left = location
                 absolute_bbox = (float(x1 + left), float(y1 + top), float(x1 + right), float(y1 + bottom))
                 if not known_encodings:
@@ -93,6 +104,14 @@ class FaceEngine:
                 face = known[best] if distance <= self.tolerance else None
                 matches.append(FaceMatch(absolute_bbox, face.name if face else "Unknown", confidence, face.person_id if face else None))
         return matches
+
+    def _validate_encoding(self, encoding: np.ndarray) -> None:
+        if encoding.ndim != 1 or len(encoding) != self.encoding_dimension:
+            raise ValueError(
+                f"face encodings must be one-dimensional with length {self.encoding_dimension}"
+            )
+        if not np.all(np.isfinite(encoding)):
+            raise ValueError("face encodings must contain only finite values")
 
     @staticmethod
     def _to_rgb(image: np.ndarray) -> np.ndarray:

@@ -33,6 +33,7 @@ class ResilientCapture:
         self._capture_factory = capture_factory
         self._cap: cv2.VideoCapture | Any | None = None
         self._lock = threading.RLock()
+        self._stop_event = threading.Event()
         self._closed = False
         self._next_reconnect_at = 0.0
 
@@ -42,18 +43,27 @@ class ResilientCapture:
             return bool(self._cap is not None and self._cap.isOpened())
 
     def read(self) -> tuple[bool, np.ndarray | None]:
-        with self._lock:
-            if self._closed:
-                return False, None
-            if self._cap is None or not self._cap.isOpened():
-                if time.monotonic() < self._next_reconnect_at or not self._connect():
+        while True:
+            with self._lock:
+                if self._closed:
                     return False, None
-            success, frame = self._cap.read()
-            if success and frame is not None:
-                return True, frame
-            self._release_locked()
-            self._next_reconnect_at = time.monotonic() + self.reconnect_delay
-            return False, None
+                wait_seconds = max(0.0, self._next_reconnect_at - time.monotonic())
+            if wait_seconds > 0:
+                if self._stop_event.wait(wait_seconds):
+                    return False, None
+                continue
+            with self._lock:
+                if self._closed:
+                    return False, None
+                if self._cap is None or not self._cap.isOpened():
+                    if not self._connect():
+                        return False, None
+                success, frame = self._cap.read()
+                if success and frame is not None:
+                    return True, frame
+                self._release_locked()
+                self._next_reconnect_at = time.monotonic() + self.reconnect_delay
+                return False, None
 
     def _connect(self) -> bool:
         self._release_locked()
@@ -83,6 +93,7 @@ class ResilientCapture:
         return isinstance(self.source, str) and self.source.lower().startswith(("rtsp://", "rtsps://"))
 
     def close(self) -> None:
+        self._stop_event.set()
         with self._lock:
             self._closed = True
             self._release_locked()

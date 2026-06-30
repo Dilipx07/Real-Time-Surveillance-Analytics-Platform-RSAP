@@ -65,6 +65,40 @@ def test_resilient_capture_reads_and_releases_failed_source() -> None:
     capture.close()
 
 
+def test_capture_reconnect_is_rate_limited_without_holding_lock() -> None:
+    FakeCapture.instances.clear()
+    capture = ResilientCapture(0, reconnect_delay=0.1, capture_factory=FakeCapture)
+    assert capture.read()[0]
+    assert not capture.read()[0]
+    started = time.monotonic()
+    success, _ = capture.read()
+    elapsed = time.monotonic() - started
+    capture.close()
+    assert success
+    assert elapsed >= 0.08
+    assert len(FakeCapture.instances) == 2
+
+
+def test_capture_shutdown_interrupts_reconnect_wait_promptly() -> None:
+    FakeCapture.instances.clear()
+    capture = ResilientCapture(0, reconnect_delay=5.0, capture_factory=FakeCapture)
+    assert capture.read()[0]
+    assert not capture.read()[0]
+    result: list[tuple[bool, np.ndarray | None]] = []
+    waiter = threading.Thread(target=lambda: result.append(capture.read()))
+    waiter.start()
+    time.sleep(0.05)
+    probe_started = time.monotonic()
+    assert not capture.is_opened
+    assert time.monotonic() - probe_started < 0.1
+    close_started = time.monotonic()
+    capture.close()
+    waiter.join(timeout=0.5)
+    assert not waiter.is_alive()
+    assert time.monotonic() - close_started < 0.5
+    assert result == [(False, None)]
+
+
 def test_image_and_overlay_helpers_do_not_mutate_source() -> None:
     frame = np.zeros((100, 200, 3), dtype=np.uint8)
     detection = Detection((10, 10, 40, 60), 0.9, 0, "person")
