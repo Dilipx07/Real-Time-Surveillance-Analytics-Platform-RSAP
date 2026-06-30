@@ -9,6 +9,7 @@ from minio.error import S3Error
 from minio.lifecycleconfig import Expiration, Filter, LifecycleConfig, Rule
 
 from app.config import Settings
+from app.presigned import clamp_presigned_expiry
 
 
 class ObjectNotFoundError(Exception):
@@ -104,10 +105,11 @@ class StorageService:
 
     def presigned_url(self, bucket: str, file_id: UUID, expires: int) -> str:
         object_name = self.resolve_object_name(bucket, file_id)
+        effective_expiry = clamp_presigned_expiry(self.settings, expires)
         return self.signing_client.presigned_get_object(
             bucket_name=bucket,
             object_name=object_name,
-            expires=timedelta(seconds=expires),
+            expires=timedelta(seconds=effective_expiry),
         )
 
     def remove(self, bucket: str, file_id: UUID) -> None:

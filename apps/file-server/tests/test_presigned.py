@@ -31,12 +31,16 @@ def test_expiry_is_clamped_for_default_and_explicit_values() -> None:
 
 
 def test_signing_uses_public_endpoint_without_rewriting() -> None:
-    configured = settings(minio_public_secure=True)
+    configured = settings(
+        minio_public_secure=True,
+        presigned_url_max_expiry_seconds=60,
+    )
     storage = StorageService.create(configured)
     storage.resolve_object_name = lambda _bucket, _file_id: f"{_file_id}.jpg"  # type: ignore[method-assign]
     try:
-        url = storage.presigned_url("faces", uuid4(), 60)
+        url = storage.presigned_url("faces", uuid4(), 3600)
     finally:
         storage.close()
     assert url.startswith("https://public.example.test:9443/faces/")
     assert "minio:9000" not in url
+    assert "X-Amz-Expires=60" in url
