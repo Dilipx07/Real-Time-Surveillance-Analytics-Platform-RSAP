@@ -44,6 +44,7 @@ async def login(payload: LoginRequest, request: Request, db: asyncpg.Connection 
     session_token = str(uuid4())
     sid = session_identifier(session_token)
     access_token, refresh_token, refresh_jti = issue_token_pair(str(user["id"]), sid)
+    refresh_expires_at = int(decode_token(refresh_token, expected_type="refresh")["exp"])
     activated = False
     try:
         async with db.transaction():
@@ -84,13 +85,16 @@ async def login(payload: LoginRequest, request: Request, db: asyncpg.Connection 
                 user["id"],
                 session_state(
                     session_token,
+                    user["id"],
                     license_row["id"],
                     license_row["valid_from"],
                     license_row["valid_until"],
+                    refresh_expires_at,
+                    refresh_expires_at,
                 ),
-                refresh_state(refresh_token, refresh_jti, sid),
-                ttl,
-                min(ttl, get_settings().jwt_refresh_expire_days * 86400),
+                refresh_state(refresh_token, refresh_jti, sid, refresh_expires_at),
+                min(refresh_expires_at, int(license_row["valid_until"].timestamp())),
+                min(refresh_expires_at, int(license_row["valid_until"].timestamp())),
             )
             activated = True
     except Exception:
@@ -153,14 +157,16 @@ async def refresh(
     if session_ttl <= 0:
         raise HTTPException(status_code=401, detail="Refresh session is invalid or expired")
     access, replacement_refresh, replacement_jti = issue_token_pair(str(user_id), sid)
+    replacement_expires_at = int(
+        decode_token(replacement_refresh, expected_type="refresh")["exp"]
+    )
     rotated = await rotate_refresh(
         request.app.state.redis,
         user_id,
         payload.refresh_token,
         str(token_payload["jti"]),
         sid,
-        refresh_state(replacement_refresh, replacement_jti, sid),
-        min(session_ttl, get_settings().jwt_refresh_expire_days * 86400),
+        refresh_state(replacement_refresh, replacement_jti, sid, replacement_expires_at),
     )
     if not rotated:
         current = await load_json(request.app.state.redis, f"refresh:{user_id}")

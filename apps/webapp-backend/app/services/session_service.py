@@ -15,15 +15,36 @@ ROTATE_REFRESH_LUA = """
 local current = redis.call('GET', KEYS[1])
 local session = redis.call('GET', KEYS[2])
 if not current or not session then return 0 end
-local refresh_data = cjson.decode(current)
-local session_data = cjson.decode(session)
+local refresh_ok, refresh_data = pcall(cjson.decode, current)
+local session_ok, session_data = pcall(cjson.decode, session)
+local replacement_ok, replacement = pcall(cjson.decode, ARGV[4])
+if not refresh_ok or not session_ok or not replacement_ok then
+  redis.call('DEL', KEYS[1], KEYS[2])
+  return 0
+end
 if refresh_data['token_hash'] ~= ARGV[1]
    or refresh_data['jti'] ~= ARGV[2]
    or refresh_data['sid'] ~= ARGV[3]
-   or session_data['sid'] ~= ARGV[3] then
+   or session_data['sid'] ~= ARGV[3]
+   or replacement['sid'] ~= ARGV[3]
+   or type(replacement['refresh_expires_at']) ~= 'number'
+   or type(session_data['session_expires_at']) ~= 'number'
+   or type(session_data['license_expires_at']) ~= 'number' then
   return 0
 end
-redis.call('SET', KEYS[1], ARGV[4], 'EX', ARGV[5])
+local now = tonumber(redis.call('TIME')[1])
+local refresh_expiry = math.min(
+  replacement['refresh_expires_at'], session_data['license_expires_at']
+)
+local session_expiry = math.min(
+  session_data['session_expires_at'], session_data['license_expires_at']
+)
+if refresh_expiry <= now or session_expiry <= now then return 0 end
+session_data['refresh_expires_at'] = replacement['refresh_expires_at']
+redis.call('SET', KEYS[2], cjson.encode(session_data))
+redis.call('EXPIREAT', KEYS[2], session_expiry)
+redis.call('SET', KEYS[1], ARGV[4])
+redis.call('EXPIREAT', KEYS[1], refresh_expiry)
 return 1
 """
 
@@ -41,19 +62,39 @@ return 1
 
 RECONCILE_LUA = """
 local session = redis.call('GET', KEYS[1])
-if not session then return 0 end
-local data = cjson.decode(session)
-if ARGV[1] ~= '' and data['sid'] ~= ARGV[1] then return 0 end
-data['license_id'] = ARGV[2]
-data['license_valid_from'] = ARGV[3]
-data['license_expires_at'] = ARGV[4]
-redis.call('SET', KEYS[1], cjson.encode(data), 'EX', ARGV[5])
-if redis.call('EXISTS', KEYS[2]) == 1 then
-  local refresh_ttl = redis.call('TTL', KEYS[2])
-  if refresh_ttl < 0 or refresh_ttl > tonumber(ARGV[5]) then
-    redis.call('EXPIRE', KEYS[2], ARGV[5])
-  end
+local refresh = redis.call('GET', KEYS[2])
+if not session or not refresh then
+  redis.call('DEL', KEYS[1], KEYS[2])
+  return 0
 end
+local session_ok, data = pcall(cjson.decode, session)
+local refresh_ok, refresh_data = pcall(cjson.decode, refresh)
+if not session_ok or not refresh_ok
+   or not data['sid'] or data['sid'] ~= refresh_data['sid']
+   or (ARGV[1] ~= '' and data['sid'] ~= ARGV[1])
+   or type(data['session_expires_at']) ~= 'number'
+   or type(refresh_data['refresh_expires_at']) ~= 'number' then
+  redis.call('DEL', KEYS[1], KEYS[2])
+  return 0
+end
+local now = tonumber(redis.call('TIME')[1])
+local license_valid_from = tonumber(ARGV[3])
+local license_expiry = tonumber(ARGV[4])
+if not license_valid_from or not license_expiry
+   or license_valid_from > now or license_expiry <= now then return 0 end
+local session_expiry = math.min(data['session_expires_at'], license_expiry)
+local refresh_expiry = math.min(refresh_data['refresh_expires_at'], license_expiry)
+if session_expiry <= now or refresh_expiry <= now then
+  redis.call('DEL', KEYS[1], KEYS[2])
+  return 0
+end
+data['license_id'] = ARGV[2]
+data['license_valid_from'] = license_valid_from
+data['license_expires_at'] = license_expiry
+data['refresh_expires_at'] = refresh_data['refresh_expires_at']
+redis.call('SET', KEYS[1], cjson.encode(data))
+redis.call('EXPIREAT', KEYS[1], session_expiry)
+redis.call('EXPIREAT', KEYS[2], refresh_expiry)
 return 1
 """
 
@@ -64,37 +105,77 @@ def _json(data: dict[str, Any]) -> str:
 
 def session_state(
     session_token: str,
+    user_id: UUID,
     license_id: UUID,
     valid_from: datetime,
     valid_until: datetime,
+    session_expires_at: int,
+    refresh_expires_at: int,
 ) -> dict[str, Any]:
     sid = session_identifier(session_token)
     return {
         "sid": sid,
+        "session_id": sid,
+        "user_id": str(user_id),
         "token_hash": token_hash(session_token),
         "license_id": str(license_id),
-        "license_valid_from": valid_from.astimezone(UTC).isoformat(),
-        "license_expires_at": valid_until.astimezone(UTC).isoformat(),
+        "license_valid_from": int(valid_from.astimezone(UTC).timestamp()),
+        "license_expires_at": int(valid_until.astimezone(UTC).timestamp()),
+        "session_expires_at": session_expires_at,
+        "refresh_expires_at": refresh_expires_at,
     }
 
 
-def refresh_state(refresh_token: str, refresh_jti: str, sid: str) -> dict[str, str]:
-    return {"token_hash": token_hash(refresh_token), "jti": refresh_jti, "sid": sid}
+def refresh_state(
+    refresh_token: str, refresh_jti: str, sid: str, refresh_expires_at: int
+) -> dict[str, Any]:
+    return {
+        "token_hash": token_hash(refresh_token),
+        "jti": refresh_jti,
+        "sid": sid,
+        "refresh_expires_at": refresh_expires_at,
+    }
+
+
+def reconciliation_expiries(
+    state: dict[str, Any],
+    refresh: dict[str, Any],
+    license_valid_from: int,
+    license_expires_at: int,
+    now: int,
+) -> tuple[int, int]:
+    """Validate a session pair and return its independently bounded expiries."""
+    if license_valid_from > now or license_expires_at <= now:
+        raise ValueError("license is not currently active")
+    if not state.get("sid") or state.get("sid") != refresh.get("sid"):
+        raise ValueError("session and refresh metadata do not form a pair")
+    try:
+        session_absolute = int(state["session_expires_at"])
+        refresh_absolute = int(refresh["refresh_expires_at"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("absolute session expiry metadata is required") from exc
+    session_effective = min(session_absolute, license_expires_at)
+    refresh_effective = min(refresh_absolute, license_expires_at)
+    if session_effective <= now or refresh_effective <= now:
+        raise ValueError("session pair is already expired")
+    return session_effective, refresh_effective
 
 
 async def activate_session(
     redis: Redis,
     user_id: UUID,
     state: dict[str, Any],
-    refresh: dict[str, str],
-    session_ttl: int,
-    refresh_ttl: int,
+    refresh: dict[str, Any],
+    session_expires_at: int,
+    refresh_expires_at: int,
 ) -> None:
     async with redis.pipeline(transaction=True) as pipe:
-        pipe.set(f"session:{user_id}", _json(state), ex=session_ttl)
-        pipe.set(f"refresh:{user_id}", _json(refresh), ex=refresh_ttl)
+        pipe.set(f"session:{user_id}", _json(state))
+        pipe.expireat(f"session:{user_id}", session_expires_at)
+        pipe.set(f"refresh:{user_id}", _json(refresh))
+        pipe.expireat(f"refresh:{user_id}", refresh_expires_at)
         results = await pipe.execute()
-    if results != [True, True]:
+    if results != [True, True, True, True]:
         raise RuntimeError("Redis did not activate a coherent session pair")
 
 
@@ -135,8 +216,8 @@ async def validate_session_state(
         return None
     try:
         license_id = UUID(str(state["license_id"]))
-        valid_from = datetime.fromisoformat(str(state["license_valid_from"])).astimezone(UTC)
-        expires_at = datetime.fromisoformat(str(state["license_expires_at"])).astimezone(UTC)
+        valid_from = datetime.fromtimestamp(int(state["license_valid_from"]), UTC)
+        expires_at = datetime.fromtimestamp(int(state["license_expires_at"]), UTC)
     except (KeyError, ValueError, TypeError):
         return None
     now = datetime.now(UTC)
@@ -172,8 +253,7 @@ async def rotate_refresh(
     expected_token: str,
     expected_jti: str,
     sid: str,
-    replacement: dict[str, str],
-    ttl: int,
+    replacement: dict[str, Any],
 ) -> bool:
     result = await redis.eval(
         ROTATE_REFRESH_LUA,
@@ -184,7 +264,6 @@ async def rotate_refresh(
         expected_jti,
         sid,
         _json(replacement),
-        ttl,
     )
     return result == 1
 
@@ -244,12 +323,6 @@ async def process_session_outbox_once(app: Any, limit: int = 100) -> int:
                             row["user_id"],
                             license_row["valid_until"],
                         )
-                        ttl = max(
-                            1,
-                            int(
-                                (license_row["valid_until"] - datetime.now(UTC)).total_seconds()
-                            ),
-                        )
                         await app.state.redis.eval(
                             RECONCILE_LUA,
                             2,
@@ -257,9 +330,8 @@ async def process_session_outbox_once(app: Any, limit: int = 100) -> int:
                             f"refresh:{row['user_id']}",
                             str(row["payload"].get("sid", "")),
                             str(license_row["id"]),
-                            license_row["valid_from"].astimezone(UTC).isoformat(),
-                            license_row["valid_until"].astimezone(UTC).isoformat(),
-                            ttl,
+                            int(license_row["valid_from"].astimezone(UTC).timestamp()),
+                            int(license_row["valid_until"].astimezone(UTC).timestamp()),
                         )
                 await db.execute(
                     "UPDATE auth.session_outbox SET processed_at=NOW(), attempts=attempts+1, last_error=NULL WHERE id=$1",
