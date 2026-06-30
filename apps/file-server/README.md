@@ -16,19 +16,47 @@ and captures receive a 90-day expiry lifecycle rule.
 
 ## Required environment
 
+The values shown with angle brackets are deliberately invalid placeholders.
+The service rejects blank, known default, and placeholder credentials at startup.
+
 ```text
-MINIO_ENDPOINT=minio:9000
-MINIO_ACCESS_KEY=<access-key>
-MINIO_SECRET_KEY=<secret-key>
+MINIO_INTERNAL_ENDPOINT=minio:9000
+MINIO_INTERNAL_SECURE=false
+MINIO_PUBLIC_ENDPOINT=s3.rsap.local
+MINIO_PUBLIC_SECURE=true
+MINIO_REGION=us-east-1
+MINIO_ACCESS_KEY=<required-access-key>
+MINIO_SECRET_KEY=<required-secret-key-at-least-16-characters>
 MINIO_BUCKET_FACES=faces
 MINIO_BUCKET_CAPTURES=captures
 MINIO_BUCKET_DOCUMENTS=documents
-MINIO_SECURE=false
 FILE_SERVER_SERVICE_TOKEN=<at-least-16-characters>
 ```
 
 Optional settings are `CAPTURE_RETENTION_DAYS` (default `90`) and
-`PRESIGNED_URL_MAX_EXPIRY_SECONDS` (default `86400`).
+`PRESIGNED_URL_DEFAULT_EXPIRY_SECONDS` (default `3600`).
+`PRESIGNED_URL_MAX_EXPIRY_SECONDS` (default `86400`) is enforced for every
+generated URL, including upload responses and redirects.
+
+## Internal and public MinIO endpoints
+
+The production design uses two MinIO clients:
+
+- `MINIO_INTERNAL_ENDPOINT` handles bucket and object operations over `rsap-net`.
+- `MINIO_PUBLIC_ENDPOINT` signs browser-facing URLs without rewriting them.
+
+Production Caddy routes `s3.rsap.local` directly to MinIO's S3 API on port
+`9000`, preserving the signed `Host` header. Configure public DNS and a trusted
+certificate for the production hostname. The bundled `.local` configuration
+uses Caddy's internal CA and is intended for controlled local deployments.
+
+The base Compose file publishes neither MinIO nor file-server ports. Use Caddy
+for production access. `infra/docker-compose.dev.yml` publishes MinIO ports
+`9000`/`9001` and file-server port `8002`, and signs local development URLs for
+`http://localhost:9000`.
+
+Never change a presigned URL's hostname after signing; doing so invalidates its
+signature.
 
 ## API summary
 
@@ -56,4 +84,12 @@ python -m pip install --upgrade pip
 pip install -r requirements-dev.txt
 python -m compileall .
 pytest -q
+
+$env:RSAP_RUN_MINIO_INTEGRATION = "1"
+pytest -m integration -q
+Remove-Item Env:RSAP_RUN_MINIO_INTEGRATION
 ```
+
+Integration tests start an isolated MinIO container on a random host port,
+verify external URL retrieval and continuation-token pagination, and remove the
+container and its ephemeral data afterward.
