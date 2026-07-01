@@ -1,2 +1,1 @@
 """RSAP desktop backend foundation."""
-

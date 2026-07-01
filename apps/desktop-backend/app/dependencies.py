@@ -32,4 +32,3 @@ async def current_session(
 
 
 CurrentSession = Annotated[LocalSession, Depends(current_session)]
-

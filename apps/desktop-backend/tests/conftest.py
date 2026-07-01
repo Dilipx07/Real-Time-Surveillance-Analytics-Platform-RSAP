@@ -34,4 +34,3 @@ def settings(tmp_path: Path) -> Settings:
         retry_attempts=3,
         retry_base_delay_seconds=0,
     )
-

@@ -45,4 +45,3 @@ def install_exception_handlers(app: FastAPI) -> None:
     async def internal_error(_: Request, exc: Exception) -> JSONResponse:
         logger.exception("Unhandled desktop API error", exc_info=exc)
         return error("Internal server error", 500, "internal_error")
-

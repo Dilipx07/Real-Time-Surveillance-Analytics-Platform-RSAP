@@ -73,4 +73,3 @@ async def test_sqlcipher_file_is_not_plain_sqlite(settings, tmp_path):
             plain.execute("SELECT * FROM schema_migrations").fetchall()
         finally:
             plain.close()
-

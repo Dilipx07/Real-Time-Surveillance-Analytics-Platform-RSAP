@@ -49,4 +49,3 @@ class FieldCipher:
             return json.loads(self.decrypt(encoded, purpose))
         except json.JSONDecodeError as exc:
             raise DecryptionError("encrypted local JSON is invalid") from exc
-

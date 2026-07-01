@@ -85,4 +85,3 @@ CREATE INDEX idx_events_unsynced ON local_analytics_events(synced, created_at);
 CREATE INDEX idx_alerts_unsynced ON local_alerts(synced, created_at);
 CREATE INDEX idx_counts_unsynced ON local_people_counts(synced, captured_at);
 CREATE INDEX idx_sync_ready ON sync_queue(state, next_attempt_at, lease_expires_at);
-
