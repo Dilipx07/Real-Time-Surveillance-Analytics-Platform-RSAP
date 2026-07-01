@@ -100,9 +100,9 @@ and sensitive query parameters are redacted before errors reach status/logs.
 From the repository root in PowerShell:
 
 ```powershell
-python -m venv .venv-orchestration
-.\.venv-orchestration\Scripts\python -m pip install --upgrade pip
-.\.venv-orchestration\Scripts\python -m pip install -r .\apps\desktop-backend\requirements-orchestration-dev.txt
-.\.venv-orchestration\Scripts\python -m pytest .\apps\desktop-backend\tests -q
-.\.venv-orchestration\Scripts\python -m compileall .\apps\desktop-backend\app
+python -m venv .venv
+.\.venv\Scripts\python -m pip install --upgrade pip
+.\.venv\Scripts\python -m pip install -r .\apps\desktop-backend\requirements-orchestration-dev.txt
+.\.venv\Scripts\python -m pytest .\apps\desktop-backend\tests -q
+.\.venv\Scripts\python -m compileall .\apps\desktop-backend\app
 ```
