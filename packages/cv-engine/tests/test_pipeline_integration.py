@@ -2,6 +2,7 @@ import asyncio
 import threading
 import time
 import warnings
+from collections.abc import Awaitable
 from datetime import UTC, datetime
 
 import numpy as np
@@ -20,6 +21,21 @@ class SyntheticDetector:
         y = self.y
         self.y += 8
         return [Detection((40, y, 60, y + 20), 0.95, 0, "person")]
+
+
+def observe_executor_shutdown(
+    pipeline: FramePipeline,
+    callback_settled: asyncio.Event | threading.Event,
+) -> list[bool]:
+    observations: list[bool] = []
+    original_shutdown = pipeline._executor.shutdown
+
+    def observed_shutdown(*args: object, **kwargs: object) -> None:
+        observations.append(callback_settled.is_set())
+        original_shutdown(*args, **kwargs)
+
+    pipeline._executor.shutdown = observed_shutdown  # type: ignore[method-assign]
+    return observations
 
 
 def test_synthetic_pipeline_tracks_crossing_and_emits_events() -> None:
@@ -95,6 +111,37 @@ async def test_async_callback_failure_is_observable() -> None:
     pipeline.close()
     assert isinstance(error.value.__cause__, RuntimeError)
     assert str(error.value.__cause__) == "callback exploded"
+
+
+@pytest.mark.asyncio
+async def test_wait_for_callbacks_waits_for_callback_submission_in_progress() -> None:
+    submission_started = threading.Event()
+    release_submission = threading.Event()
+    completed = asyncio.Event()
+
+    async def complete_callback() -> None:
+        completed.set()
+
+    def callback(_: object) -> Awaitable[None]:
+        submission_started.set()
+        assert release_submission.wait(2)
+        return complete_callback()
+
+    zone = Zone("submission-race", "All", ((0, 0), (1, 0), (1, 1), (0, 1)))
+    pipeline = FramePipeline(CVConfig(zones=(zone,), tracker_min_hits=1), callback, detector=SyntheticDetector())
+    processing = asyncio.create_task(
+        pipeline.process_async(np.zeros((100, 100, 3), dtype=np.uint8), datetime.now(UTC))
+    )
+    assert await asyncio.to_thread(submission_started.wait, 1)
+
+    waiting = asyncio.create_task(pipeline.wait_for_callbacks())
+    await asyncio.sleep(0.02)
+    assert not waiting.done()
+
+    release_submission.set()
+    await asyncio.gather(processing, waiting)
+    assert completed.is_set()
+    await pipeline.aclose()
 
 
 @pytest.mark.asyncio
@@ -226,6 +273,45 @@ async def test_callback_shutdown_is_concurrently_idempotent() -> None:
     assert len(pipeline._callback_futures) == 0
 
 
+def test_callback_shutdown_is_idempotent_across_event_loops() -> None:
+    pipeline = FramePipeline(CVConfig(), detector=SyntheticDetector())
+    asyncio.run(pipeline.aclose())
+    asyncio.run(pipeline.aclose())
+    pipeline.close()
+
+
+@pytest.mark.asyncio
+async def test_callback_shutdown_rejects_reentrant_await_without_deadlock() -> None:
+    async def callback(_: object) -> None:
+        await pipeline.aclose()
+
+    zone = Zone("shutdown-reentrant", "All", ((0, 0), (1, 0), (1, 1), (0, 1)))
+    pipeline = FramePipeline(CVConfig(zones=(zone,), tracker_min_hits=1), callback, detector=SyntheticDetector())
+    await pipeline.process_async(np.zeros((100, 100, 3), dtype=np.uint8), datetime.now(UTC))
+
+    with pytest.raises(CallbackExecutionError) as error:
+        await asyncio.wait_for(pipeline.wait_for_callbacks(), timeout=1)
+    assert isinstance(error.value.__cause__, RuntimeError)
+    assert "cannot be awaited from its own event callback" in str(error.value.__cause__)
+    await pipeline.aclose()
+
+
+@pytest.mark.asyncio
+async def test_callback_wait_rejects_reentrant_await_without_deadlock() -> None:
+    async def callback(_: object) -> None:
+        await pipeline.wait_for_callbacks()
+
+    zone = Zone("wait-reentrant", "All", ((0, 0), (1, 0), (1, 1), (0, 1)))
+    pipeline = FramePipeline(CVConfig(zones=(zone,), tracker_min_hits=1), callback, detector=SyntheticDetector())
+    await pipeline.process_async(np.zeros((100, 100, 3), dtype=np.uint8), datetime.now(UTC))
+
+    with pytest.raises(CallbackExecutionError) as error:
+        await asyncio.wait_for(pipeline.wait_for_callbacks(), timeout=1)
+    assert isinstance(error.value.__cause__, RuntimeError)
+    assert "wait_for_callbacks() cannot be awaited" in str(error.value.__cause__)
+    await pipeline.aclose()
+
+
 @pytest.mark.asyncio
 async def test_callback_backlog_remains_bounded_during_shutdown() -> None:
     started = asyncio.Event()
@@ -260,3 +346,114 @@ async def test_sync_callback_shutdown_is_deterministic() -> None:
     await pipeline.aclose()
     assert len(events) == 1
     assert len(pipeline._callback_futures) == 0
+
+
+@pytest.mark.asyncio
+async def test_callback_executor_shutdown_after_callbacks_drain() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    completed = asyncio.Event()
+
+    async def callback(_: object) -> None:
+        started.set()
+        await release.wait()
+        completed.set()
+
+    zone = Zone("shutdown-order-drain", "All", ((0, 0), (1, 0), (1, 1), (0, 1)))
+    pipeline = FramePipeline(CVConfig(zones=(zone,), tracker_min_hits=1), callback, detector=SyntheticDetector())
+    observations = observe_executor_shutdown(pipeline, completed)
+    await pipeline.process_async(np.zeros((100, 100, 3), dtype=np.uint8), datetime.now(UTC))
+    await started.wait()
+
+    closing = asyncio.create_task(pipeline.aclose())
+    await asyncio.sleep(0)
+    with pytest.raises(RuntimeError, match="no longer accepting callbacks"):
+        pipeline._emit(AnalyticsEvent("late", datetime.now(UTC), None, None))
+    assert observations == []
+
+    release.set()
+    await closing
+    assert len(pipeline._callback_futures) == 0
+    assert observations == [True]
+    assert all(observations)
+
+
+@pytest.mark.asyncio
+async def test_callback_executor_shutdown_after_callbacks_cancel() -> None:
+    started = asyncio.Event()
+    cancellation_settled = asyncio.Event()
+
+    async def callback(_: object) -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancellation_settled.set()
+
+    zone = Zone("shutdown-order-cancel", "All", ((0, 0), (1, 0), (1, 1), (0, 1)))
+    pipeline = FramePipeline(CVConfig(zones=(zone,), tracker_min_hits=1), callback, detector=SyntheticDetector())
+    observations = observe_executor_shutdown(pipeline, cancellation_settled)
+    await pipeline.process_async(np.zeros((100, 100, 3), dtype=np.uint8), datetime.now(UTC))
+    await started.wait()
+
+    await pipeline.aclose(cancel_pending=True)
+    assert cancellation_settled.is_set()
+    assert len(pipeline._callback_futures) == 0
+    assert observations == [True]
+    assert all(observations)
+
+
+@pytest.mark.asyncio
+async def test_callback_executor_shutdown_after_callbacks_synchronous() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    completed = threading.Event()
+
+    def callback(_: object) -> None:
+        started.set()
+        assert release.wait(2)
+        completed.set()
+
+    zone = Zone("shutdown-order-sync", "All", ((0, 0), (1, 0), (1, 1), (0, 1)))
+    pipeline = FramePipeline(CVConfig(zones=(zone,), tracker_min_hits=1), callback, detector=SyntheticDetector())
+    observations = observe_executor_shutdown(pipeline, completed)
+    processing = asyncio.create_task(
+        pipeline.process_async(np.zeros((100, 100, 3), dtype=np.uint8), datetime.now(UTC))
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+
+    closing = asyncio.create_task(pipeline.aclose())
+    await asyncio.sleep(0.02)
+    assert observations == []
+
+    release.set()
+    await asyncio.gather(processing, closing)
+    assert len(pipeline._callback_futures) == 0
+    assert observations == [True]
+    assert all(observations)
+
+
+@pytest.mark.asyncio
+async def test_callback_executor_shutdown_after_callbacks_concurrent_close_once() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    completed = asyncio.Event()
+
+    async def callback(_: object) -> None:
+        started.set()
+        await release.wait()
+        completed.set()
+
+    zone = Zone("shutdown-order-concurrent", "All", ((0, 0), (1, 0), (1, 1), (0, 1)))
+    pipeline = FramePipeline(CVConfig(zones=(zone,), tracker_min_hits=1), callback, detector=SyntheticDetector())
+    observations = observe_executor_shutdown(pipeline, completed)
+    await pipeline.process_async(np.zeros((100, 100, 3), dtype=np.uint8), datetime.now(UTC))
+    await started.wait()
+
+    closers = [asyncio.create_task(pipeline.aclose()) for _ in range(3)]
+    await asyncio.sleep(0.02)
+    release.set()
+    await asyncio.gather(*closers)
+    assert len(pipeline._callback_futures) == 0
+    assert observations == [True]
+    assert all(observations)
