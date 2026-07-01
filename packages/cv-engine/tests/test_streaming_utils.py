@@ -99,6 +99,89 @@ def test_capture_shutdown_interrupts_reconnect_wait_promptly() -> None:
     assert result == [(False, None)]
 
 
+def test_close_during_connect_returns_promptly_and_discards_late_candidate() -> None:
+    constructor_started = threading.Event()
+    constructor_release = threading.Event()
+    instances = []
+
+    class BlockingCapture(FakeCapture):
+        def __init__(self, source: object, backend: object = None) -> None:
+            super().__init__(source, backend)
+            instances.append(self)
+            constructor_started.set()
+            constructor_release.wait(2)
+
+    capture = ResilientCapture(0, reconnect_delay=0.1, capture_factory=BlockingCapture)
+    reader = threading.Thread(target=capture.read)
+    reader.start()
+    assert constructor_started.wait(1)
+    started = time.monotonic()
+    capture.close()
+    elapsed = time.monotonic() - started
+    close_blocked_during_connect = elapsed >= 0.1
+    assert close_blocked_during_connect is False
+    assert not capture.is_opened
+    constructor_release.set()
+    reader.join(timeout=1)
+    assert not reader.is_alive()
+    assert instances[0].released
+    assert not capture.is_opened
+
+
+def test_stale_connect_generation_cannot_replace_newer_capture() -> None:
+    first_started = threading.Event()
+    release_first = threading.Event()
+    instances = []
+    call_lock = threading.Lock()
+    calls = 0
+
+    class OrderedCapture(FakeCapture):
+        def __init__(self, source: object, backend: object = None) -> None:
+            nonlocal calls
+            super().__init__(source, backend)
+            with call_lock:
+                calls += 1
+                call = calls
+            self.call = call
+            instances.append(self)
+            if call == 1:
+                first_started.set()
+                release_first.wait(2)
+
+    capture = ResilientCapture(0, reconnect_delay=0, capture_factory=OrderedCapture)
+    first_reader = threading.Thread(target=capture.read)
+    first_reader.start()
+    assert first_started.wait(1)
+    second_reader = threading.Thread(target=capture.read)
+    second_reader.start()
+    second_reader.join(timeout=1)
+    assert not second_reader.is_alive()
+    release_first.set()
+    first_reader.join(timeout=1)
+    assert not first_reader.is_alive()
+    assert instances[0].released
+    assert not instances[1].released
+    assert capture.is_opened
+    capture.close()
+    capture.close()
+    assert instances[1].released
+
+
+def test_closed_capture_never_reconnects() -> None:
+    calls = 0
+
+    def factory(source: object) -> FakeCapture:
+        nonlocal calls
+        calls += 1
+        return FakeCapture(source)
+
+    capture = ResilientCapture(0, capture_factory=factory)
+    capture.close()
+    capture.close()
+    assert capture.read() == (False, None)
+    assert calls == 0
+
+
 def test_image_and_overlay_helpers_do_not_mutate_source() -> None:
     frame = np.zeros((100, 200, 3), dtype=np.uint8)
     detection = Detection((10, 10, 40, 60), 0.9, 0, "person")

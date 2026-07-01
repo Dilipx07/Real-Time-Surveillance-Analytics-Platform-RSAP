@@ -36,6 +36,7 @@ class ResilientCapture:
         self._stop_event = threading.Event()
         self._closed = False
         self._next_reconnect_at = 0.0
+        self._connect_generation = 0
 
     @property
     def is_opened(self) -> bool:
@@ -55,38 +56,61 @@ class ResilientCapture:
             with self._lock:
                 if self._closed:
                     return False, None
-                if self._cap is None or not self._cap.isOpened():
-                    if not self._connect():
-                        return False, None
+                needs_connect = self._cap is None or not self._cap.isOpened()
+                if needs_connect:
+                    stale_capture = self._cap
+                    self._cap = None
+                    self._connect_generation += 1
+                    generation = self._connect_generation
+                else:
+                    stale_capture = None
+                    generation = None
+            self._release_capture(stale_capture)
+            if generation is not None and not self._connect(generation):
+                return False, None
+            with self._lock:
+                if self._closed or self._cap is None:
+                    return False, None
                 success, frame = self._cap.read()
                 if success and frame is not None:
                     return True, frame
-                self._release_locked()
+                failed_capture = self._cap
+                self._cap = None
                 self._next_reconnect_at = time.monotonic() + self.reconnect_delay
-                return False, None
+            self._release_capture(failed_capture)
+            return False, None
 
-    def _connect(self) -> bool:
-        self._release_locked()
+    def _connect(self, generation: int) -> bool:
+        """Construct a candidate outside the state lock and install it atomically."""
         if self._is_rtsp:
             os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp|fflags;nobuffer")
-            cap = self._capture_factory(self.source, cv2.CAP_FFMPEG)
+            candidate = self._capture_factory(self.source, cv2.CAP_FFMPEG)
         else:
-            cap = self._capture_factory(self.source)
-        self._cap = cap
-        if not cap.isOpened():
-            self._release_locked()
-            self._next_reconnect_at = time.monotonic() + self.reconnect_delay
-            return False
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        if self._is_rtsp:
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"H264"))
-        if self.width is not None:
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        if self.height is not None:
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        if self.fps is not None:
-            cap.set(cv2.CAP_PROP_FPS, self.fps)
-        return True
+            candidate = self._capture_factory(self.source)
+        opened = bool(candidate.isOpened())
+        if opened:
+            candidate.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if self._is_rtsp:
+                candidate.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"H264"))
+            if self.width is not None:
+                candidate.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            if self.height is not None:
+                candidate.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            if self.fps is not None:
+                candidate.set(cv2.CAP_PROP_FPS, self.fps)
+
+        replaced_capture = None
+        with self._lock:
+            install = opened and not self._closed and generation == self._connect_generation
+            if install:
+                replaced_capture = self._cap
+                self._cap = candidate
+            elif generation == self._connect_generation and not self._closed:
+                self._next_reconnect_at = time.monotonic() + self.reconnect_delay
+        self._release_capture(replaced_capture)
+        if not install:
+            self._release_capture(candidate)
+        return install
 
     @property
     def _is_rtsp(self) -> bool:
@@ -95,13 +119,18 @@ class ResilientCapture:
     def close(self) -> None:
         self._stop_event.set()
         with self._lock:
+            if self._closed:
+                return
             self._closed = True
-            self._release_locked()
-
-    def _release_locked(self) -> None:
-        if self._cap is not None:
-            self._cap.release()
+            self._connect_generation += 1
+            capture = self._cap
             self._cap = None
+        self._release_capture(capture)
+
+    @staticmethod
+    def _release_capture(capture: Any | None) -> None:
+        if capture is not None:
+            capture.release()
 
     def __enter__(self) -> ResilientCapture:
         return self
