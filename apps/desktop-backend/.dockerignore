@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
+tests/
+requirements-dev.txt
+pytest.ini
