@@ -53,8 +53,40 @@ def test_sort_rejects_malformed_detections(detections: np.ndarray) -> None:
         (0, 0, float("nan"), 1),
         (0, 0, float("inf"), 1),
         (0, 0, 1),
+        (-1, 0, 10, 10),
     ],
 )
 def test_detection_type_rejects_invalid_boxes(bbox: tuple[float, ...]) -> None:
     with pytest.raises(ValueError):
         Detection(bbox, 0.9, 0, "person")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_age": -1},
+        {"max_age": True},
+        {"min_hits": 0},
+        {"min_hits": False},
+        {"iou_threshold": -0.1},
+        {"iou_threshold": 2},
+        {"iou_threshold": float("nan")},
+        {"iou_threshold": True},
+    ],
+)
+def test_tracker_validation_rejects_invalid_constructor_parameters(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        Sort(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_age": 0},
+        {"min_hits": 1},
+        {"iou_threshold": 0.0},
+        {"iou_threshold": 1.0},
+    ],
+)
+def test_tracker_validation_accepts_valid_edge_parameters(kwargs: dict[str, object]) -> None:
+    assert isinstance(Sort(**kwargs), Sort)  # type: ignore[arg-type]

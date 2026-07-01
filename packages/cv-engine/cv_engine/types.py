@@ -21,6 +21,8 @@ def validate_bbox(bbox: object) -> BBox:
         raise ValueError("bbox must contain exactly four numeric coordinates")
     if not all(isfinite(value) for value in values):
         raise ValueError("bbox coordinates must be finite")
+    if any(value < 0 for value in values):
+        raise ValueError("bbox coordinates must not be negative")
     x1, y1, x2, y2 = values
     if x2 <= x1 or y2 <= y1:
         raise ValueError("bbox must have positive width and height")

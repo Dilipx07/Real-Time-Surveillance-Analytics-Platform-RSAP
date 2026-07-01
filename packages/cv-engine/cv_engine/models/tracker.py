@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
+from numbers import Integral, Real
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
@@ -125,9 +127,20 @@ def _associate(detections: np.ndarray, trackers: np.ndarray, threshold: float) -
 
 class Sort:
     def __init__(self, max_age: int = 3, min_hits: int = 2, iou_threshold: float = 0.3) -> None:
-        self.max_age = max_age
-        self.min_hits = min_hits
-        self.iou_threshold = iou_threshold
+        if isinstance(max_age, bool) or not isinstance(max_age, Integral) or max_age < 0:
+            raise ValueError("max_age must be an integer greater than or equal to zero")
+        if isinstance(min_hits, bool) or not isinstance(min_hits, Integral) or min_hits < 1:
+            raise ValueError("min_hits must be an integer greater than or equal to one")
+        if (
+            isinstance(iou_threshold, bool)
+            or not isinstance(iou_threshold, Real)
+            or not isfinite(float(iou_threshold))
+            or not 0.0 <= float(iou_threshold) <= 1.0
+        ):
+            raise ValueError("iou_threshold must be finite and between zero and one")
+        self.max_age = int(max_age)
+        self.min_hits = int(min_hits)
+        self.iou_threshold = float(iou_threshold)
         self.trackers: list[KalmanBoxTracker] = []
         self.frame_count = 0
 
@@ -173,7 +186,15 @@ class Sort:
             if tracker.time_since_update <= self.max_age:
                 survivors.append(tracker)
             if tracker.time_since_update == 0 and (tracker.hits >= self.min_hits or self.frame_count <= self.min_hits):
-                bbox = tuple(float(value) for value in tracker.get_state())
+                state = tracker.get_state()
+                bbox = (
+                    max(0.0, float(state[0])),
+                    max(0.0, float(state[1])),
+                    float(state[2]),
+                    float(state[3]),
+                )
+                if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                    continue
                 meta = tracker.metadata
                 result.append(TrackedObject(bbox, tracker.id, meta.class_id, meta.class_name, meta.confidence))
         self.trackers = survivors
