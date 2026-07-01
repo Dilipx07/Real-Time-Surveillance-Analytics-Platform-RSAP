@@ -411,6 +411,38 @@ def test_storage_error_is_sanitized_and_standardized(
     assert "raw storage message" not in response.text
 
 
+def test_unexpected_exception_uses_sanitized_internal_error_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+    storage: FakeStorage,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sensitive_text = "secret-token-and-object-name"
+
+    def fail_listing(_bucket: str, _page: int, _page_size: int):
+        raise RuntimeError(sensitive_text)
+
+    storage.list_files = fail_listing  # type: ignore[method-assign]
+    monkeypatch.setattr(main, "create_storage", lambda: storage)
+    caplog.set_level("ERROR", logger="rsap.file_server")
+    with TestClient(main.app, raise_server_exceptions=False) as test_client:
+        response = test_client.get("/files/faces", headers=AUTH_HEADERS)
+
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {
+        "success": False,
+        "error": {
+            "code": "internal_error",
+            "message": "Internal server error",
+            "details": None,
+        },
+    }
+    assert sensitive_text not in response.text
+    assert sensitive_text not in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert any(record.exc_info is not None for record in caplog.records)
+
+
 def test_batch_delete_continues_after_storage_errors(
     client: TestClient, storage: FakeStorage
 ) -> None:

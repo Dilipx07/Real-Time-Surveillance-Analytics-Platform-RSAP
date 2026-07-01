@@ -78,7 +78,86 @@ def test_missing_required_credentials_are_rejected(monkeypatch: pytest.MonkeyPat
         Settings(_env_file=None)
 
 
-@pytest.mark.parametrize("public_endpoint", ["minio:9000", "minio"])
-def test_public_endpoint_cannot_use_internal_docker_dns(public_endpoint: str) -> None:
+@pytest.mark.parametrize(
+    "public_endpoint",
+    [
+        "localhost:9000",
+        "localhost.localdomain:9000",
+        "127.0.0.1:9000",
+        "127.1.2.3:9000",
+        "[::1]:9000",
+        "[::]:9000",
+        "[fe80::1]:9000",
+        "0.0.0.0:9000",
+        "169.254.10.20:9000",
+        "minio:9000",
+        "redis:9000",
+        "postgres:5432",
+        "file-server:8002",
+        "webapp-backend:8000",
+        "webapp-frontend:3000",
+        "caddy:443",
+        "internalhost:9000",
+        "10.1.2.3:9000",
+    ],
+)
+def test_production_rejects_local_or_internal_public_endpoints(
+    public_endpoint: str,
+) -> None:
     with pytest.raises(ValidationError):
-        Settings(**(BASE_SETTINGS | {"minio_public_endpoint": public_endpoint}))
+        Settings(
+            **(
+                BASE_SETTINGS
+                | {"app_env": "production", "minio_public_endpoint": public_endpoint}
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "public_endpoint",
+    [
+        "s3.rsap.example.com",
+        "s3.rsap.example.com:443",
+        "203.0.113.20:9000",
+        "8.8.8.8:9000",
+        "[2001:4860:4860::8888]:9000",
+    ],
+)
+def test_production_accepts_qualified_dns_and_public_ips(public_endpoint: str) -> None:
+    settings = Settings(
+        **(
+            BASE_SETTINGS
+            | {"app_env": "production", "minio_public_endpoint": public_endpoint}
+        )
+    )
+    assert settings.minio_public_endpoint == public_endpoint
+
+
+@pytest.mark.parametrize("environment", ["development", "test"])
+@pytest.mark.parametrize("public_endpoint", ["localhost:9000", "127.0.0.1:9000"])
+def test_nonproduction_explicitly_allows_loopback(
+    environment: str, public_endpoint: str
+) -> None:
+    settings = Settings(
+        **(
+            BASE_SETTINGS
+            | {"app_env": environment, "minio_public_endpoint": public_endpoint}
+        )
+    )
+    assert settings.minio_public_endpoint == public_endpoint
+
+
+@pytest.mark.parametrize(
+    "public_endpoint",
+    ["minio:9000", "redis:9000", "internalhost:9000", "host/path", "user@host:9000"],
+)
+def test_development_still_rejects_malformed_or_docker_endpoints(
+    public_endpoint: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            **(
+                BASE_SETTINGS
+                | {"app_env": "development", "minio_public_endpoint": public_endpoint}
+            )
+        )

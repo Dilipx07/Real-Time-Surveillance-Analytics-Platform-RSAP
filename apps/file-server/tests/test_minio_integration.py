@@ -1,5 +1,7 @@
 import io
+import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import time
@@ -99,6 +101,7 @@ def minio_server():
 @pytest.fixture
 def real_client(monkeypatch: pytest.MonkeyPatch, minio_server: MinioTestServer):
     settings = Settings(
+        app_env="test",
         minio_internal_endpoint=minio_server.endpoint.replace("127.0.0.1", "localhost"),
         minio_public_endpoint=minio_server.endpoint,
         minio_access_key=minio_server.access_key,
@@ -215,3 +218,41 @@ def test_real_minio_continuation_pagination_and_batch_delete(real_client) -> Non
     assert batch.status_code == 200
     assert len(batch.json()["deleted"]) == 2
     assert len(batch.json()["failed"]) == 1
+
+
+def test_compose_sets_explicit_file_server_modes() -> None:
+    repository = Path(__file__).resolve().parents[3]
+    environment = os.environ.copy()
+    environment.pop("APP_ENV", None)
+    environment.update(
+        {
+            "POSTGRES_PASSWORD": "integration-postgres-password",
+            "REDIS_PASSWORD": "integration-redis-password",
+            "MINIO_ACCESS_KEY": "integration-access-key",
+            "MINIO_SECRET_KEY": "integration-minio-secret-value",
+            "JWT_SECRET": "integration-jwt-secret-at-least-32-characters",
+            "AES_ENCRYPTION_KEY": "integration-aes-encryption-key-value",
+            "LICENSE_SIGNING_SECRET": "integration-license-signing-value",
+            "FILE_SERVER_SERVICE_TOKEN": "integration-service-token-value",
+        }
+    )
+
+    def compose_config(*files: str) -> dict:
+        command = ["docker", "compose"]
+        for filename in files:
+            command.extend(["-f", str(repository / "infra" / filename)])
+        command.extend(["config", "--format", "json"])
+        result = subprocess.run(
+            command,
+            cwd=repository,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(result.stdout)
+
+    production = compose_config("docker-compose.yml")
+    development = compose_config("docker-compose.yml", "docker-compose.dev.yml")
+    assert production["services"]["file-server"]["environment"]["APP_ENV"] == "production"
+    assert development["services"]["file-server"]["environment"]["APP_ENV"] == "development"
