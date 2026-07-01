@@ -17,6 +17,11 @@ files.rsap.local {
 	reverse_proxy file-server:8002
 }
 
+s3.rsap.local {
+	tls internal
+	reverse_proxy minio:9000
+}
+
 minio.rsap.local {
 	tls internal
 	reverse_proxy minio:9001
