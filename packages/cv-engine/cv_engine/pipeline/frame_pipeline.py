@@ -93,9 +93,12 @@ class FramePipeline:
         self._last_submit = 0.0
         self._schedule_lock = threading.Lock()
         self._callback_lock = threading.Lock()
+        self._callback_condition = threading.Condition(self._callback_lock)
         self._callback_futures: set[asyncio.Task[None]] = set()
         self._callback_errors: deque[BaseException] = deque(maxlen=100)
         self._accepting_callbacks = True
+        self._active_callback_submissions = 0
+        self._callback_reservations = 0
 
     def process(self, frame: np.ndarray, timestamp: datetime) -> AnalyticsResult:
         with self._lifecycle_condition:
@@ -184,13 +187,22 @@ class FramePipeline:
     async def aclose(self, *, cancel_pending: bool = False) -> None:
         """Stop processing and deterministically drain or cancel async callbacks."""
         loop = asyncio.get_running_loop()
-        self._bind_event_loop(loop)
+        current_task = asyncio.current_task()
+        with self._callback_condition:
+            if current_task in self._callback_futures:
+                raise RuntimeError(
+                    "aclose() cannot be awaited from its own event callback; "
+                    "schedule shutdown in a separate task and return from the callback"
+                )
         with self._lifecycle_condition:
             if self._closed:
                 return
+            self._bind_event_loop(loop)
             close_task = self._close_task
             if close_task is None:
                 self._closing = True
+                with self._callback_condition:
+                    self._accepting_callbacks = False
                 close_task = loop.create_task(self._aclose_impl(cancel_pending))
                 self._close_task = close_task
         await asyncio.shield(close_task)
@@ -198,18 +210,24 @@ class FramePipeline:
     async def _aclose_impl(self, cancel_pending: bool) -> None:
         errors: tuple[BaseException, ...] = ()
         try:
-            await asyncio.to_thread(self._executor.shutdown, wait=True, cancel_futures=True)
             await asyncio.to_thread(self._wait_for_active_processes)
-            with self._callback_lock:
-                self._accepting_callbacks = False
+            await asyncio.to_thread(self._wait_for_callback_submissions)
+            with self._callback_condition:
                 pending = tuple(self._callback_futures)
             if cancel_pending:
                 for task in pending:
                     task.cancel()
             await self._settle_callbacks()
-            with self._callback_lock:
+            with self._callback_condition:
+                if self._active_callback_submissions or self._callback_futures:
+                    raise RuntimeError("callback shutdown did not settle all submissions")
                 errors = tuple(self._callback_errors)
                 self._callback_errors.clear()
+            await asyncio.to_thread(
+                self._executor.shutdown,
+                wait=True,
+                cancel_futures=False,
+            )
         finally:
             with self._lifecycle_condition:
                 self._closed = True
@@ -225,6 +243,11 @@ class FramePipeline:
     async def wait_for_callbacks(self) -> None:
         """Wait for scheduled callbacks and raise if any callback failed."""
         self._bind_event_loop(asyncio.get_running_loop())
+        current_task = asyncio.current_task()
+        with self._callback_condition:
+            if current_task in self._callback_futures:
+                raise RuntimeError("wait_for_callbacks() cannot be awaited from its own event callback")
+        await asyncio.to_thread(self._wait_for_callback_submissions)
         await self._settle_callbacks()
         with self._callback_lock:
             errors = tuple(self._callback_errors)
@@ -239,6 +262,7 @@ class FramePipeline:
             if not pending:
                 break
             await asyncio.gather(*pending, return_exceptions=True)
+            await asyncio.sleep(0)
 
     def __enter__(self) -> FramePipeline:
         return self
@@ -249,28 +273,46 @@ class FramePipeline:
     def _emit(self, event: AnalyticsEvent) -> None:
         if self.event_callback is None:
             return
-        with self._callback_lock:
+        with self._callback_condition:
             if not self._accepting_callbacks:
                 raise RuntimeError("FramePipeline is no longer accepting callbacks")
+            self._active_callback_submissions += 1
+        try:
             result = self.event_callback(event)
             if not inspect.isawaitable(result):
                 return
-            loop = self._event_loop
-            if loop is None or not loop.is_running():
+            with self._callback_condition:
+                loop = self._event_loop
+                if loop is None or not loop.is_running():
+                    close = getattr(result, "close", None)
+                    if close is not None:
+                        close()
+                    raise RuntimeError(
+                        "async event callbacks require process_async() or an explicit running event_loop"
+                    )
+                if len(self._callback_futures) + self._callback_reservations >= self._max_pending_callbacks:
+                    close = getattr(result, "close", None)
+                    if close is not None:
+                        close()
+                    raise RuntimeError("event callback backlog limit reached")
+                self._callback_reservations += 1
+            try:
+                task = self._create_callback_task(result, loop)
+            except BaseException:
                 close = getattr(result, "close", None)
                 if close is not None:
                     close()
-                raise RuntimeError(
-                    "async event callbacks require process_async() or an explicit running event_loop"
-                )
-            if len(self._callback_futures) >= self._max_pending_callbacks:
-                close = getattr(result, "close", None)
-                if close is not None:
-                    close()
-                raise RuntimeError("event callback backlog limit reached")
-            task = self._create_callback_task(result, loop)
-            self._callback_futures.add(task)
-        task.add_done_callback(self._callback_finished)
+                raise
+            finally:
+                with self._callback_condition:
+                    self._callback_reservations -= 1
+            with self._callback_condition:
+                self._callback_futures.add(task)
+            task.add_done_callback(self._callback_finished)
+        finally:
+            with self._callback_condition:
+                self._active_callback_submissions -= 1
+                self._callback_condition.notify_all()
 
     def _ensure_open(self) -> None:
         with self._lifecycle_condition:
@@ -281,6 +323,10 @@ class FramePipeline:
         with self._lifecycle_condition:
             self._lifecycle_condition.wait_for(lambda: self._active_processes == 0)
 
+    def _wait_for_callback_submissions(self) -> None:
+        with self._callback_condition:
+            self._callback_condition.wait_for(lambda: self._active_callback_submissions == 0)
+
     def _bind_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         with self._callback_lock:
             if self._event_loop is None:
@@ -288,8 +334,11 @@ class FramePipeline:
             elif self._event_loop is not loop:
                 raise RuntimeError("FramePipeline cannot dispatch callbacks across multiple event loops")
 
-    @staticmethod
-    async def _await_callback(awaitable: Awaitable[None]) -> None:
+    async def _await_callback(self, awaitable: Awaitable[None]) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            with self._callback_condition:
+                self._callback_futures.add(task)
         await awaitable
 
     def _create_callback_task(
