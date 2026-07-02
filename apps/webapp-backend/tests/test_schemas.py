@@ -26,7 +26,7 @@ def test_sync_datetime_must_have_timezone():
 
 
 def test_camera_and_aadhaar_validation():
-    camera = CameraCreate(name="Gate", stream_url="rtsp://camera/live", stream_type="rtsp")
+    camera = CameraCreate(id=uuid4(), name="Gate", stream_url="rtsp://camera/live", stream_type="rtsp")
     assert camera.stream_type == "rtsp"
     with pytest.raises(ValidationError):
         PersonUpdate(aadhaar_last4="12A4")

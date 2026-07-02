@@ -1,4 +1,5 @@
 from typing import Literal
+from uuid import UUID
 
 from pydantic import Field, field_validator
 
@@ -6,6 +7,7 @@ from app.schemas.common import StrictModel
 
 
 class CameraCreate(StrictModel):
+    id: UUID
     name: str = Field(min_length=1, max_length=255)
     stream_url: str = Field(min_length=1, max_length=4096)
     stream_type: Literal["rtsp", "webcam", "nvr"]
