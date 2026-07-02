@@ -59,7 +59,11 @@ def _enqueue(
         "SELECT * FROM sync_queue WHERE logical_key=? ORDER BY version DESC LIMIT 1",
         (logical_key,),
     ).fetchone()
-    if latest is not None and latest["state"] in {"pending", "retry_wait"}:
+    if (
+        latest is not None
+        and latest["state"] == "pending"
+        and latest["last_attempt_at"] is None
+    ):
         connection.execute(
             """UPDATE sync_queue SET endpoint=?, payload_json=?, state='pending',
                    attempt_count=0, next_attempt_at=?, depends_on_id=?,
@@ -175,6 +179,41 @@ class SessionRepository:
 
         return await self.database.write(operation)
 
+    async def begin_revocation(
+        self, expected_generation: int, max_attempts: int, lease_seconds: int
+    ) -> tuple[int, str, str] | None:
+        """Atomically deny authorization and create the first durable revocation lease."""
+        generation = expected_generation + 1
+        claim_token = str(uuid4())
+        owner = "auth-logout"
+
+        def operation(connection: Any) -> tuple[int, str, str] | None:
+            cursor = connection.execute(
+                """UPDATE local_sessions SET status='revocation_pending',generation=?,
+                       updated_at=?,last_error=NULL
+                   WHERE singleton=1 AND generation=? AND status='active'""",
+                (generation, iso(), expected_generation),
+            )
+            if cursor.rowcount != 1:
+                return None
+            item_id = _enqueue(
+                connection, "/api/v1/auth/logout",
+                {"_kind": "session_revoke", "generation": generation},
+                "session:revoke", max_attempts,
+            )
+            connection.execute(
+                """UPDATE sync_queue SET state='inflight',claim_token=?,lease_owner=?,
+                       lease_expires_at=?,last_attempt_at=?,attempt_count=attempt_count+1
+                   WHERE id=? AND state='pending'""",
+                (
+                    claim_token, owner, iso(utc_now() + timedelta(seconds=lease_seconds)),
+                    iso(), item_id,
+                ),
+            )
+            return generation, item_id, claim_token
+
+        return await self.database.write(operation)
+
     async def set_error(self, generation: int, code: str) -> None:
         await self.database.write(lambda connection: connection.execute(
             "UPDATE local_sessions SET last_error=?, updated_at=? WHERE singleton=1 AND generation=?",
@@ -283,10 +322,10 @@ class CameraRepository:
             updated = connection.execute("SELECT * FROM local_cameras WHERE id=?", (identifier,)).fetchone()
             public = self._row(updated)
             latest = connection.execute(
-                "SELECT state, payload_json FROM sync_queue WHERE logical_key=? ORDER BY version DESC LIMIT 1",
+                "SELECT state,payload_json,last_attempt_at FROM sync_queue WHERE logical_key=? ORDER BY version DESC LIMIT 1",
                 (f"camera:{identifier}",),
             ).fetchone()
-            if current["server_id"] is None and latest and latest["state"] in {"pending", "retry_wait"} and load(latest["payload_json"]).get("_method") == "POST":
+            if current["server_id"] is None and latest and latest["state"] == "pending" and latest["last_attempt_at"] is None and load(latest["payload_json"]).get("_method") == "POST":
                 central = CentralCameraCreate(
                     id=UUID(identifier), name=public["name"], stream_url=public["stream_url"],
                     stream_type=public["stream_type"], location_label=public["location_label"],
@@ -583,6 +622,26 @@ class SyncQueueRepository:
             connection.execute(
                 "UPDATE local_cameras SET server_id=?,sync_state='synced' WHERE id=?",
                 (server_id, local_id),
+            )
+            return True
+
+        return await self.database.write(operation)
+
+    async def complete_revocation(
+        self, item_id: str, claim_token: str, owner: str, generation: int
+    ) -> bool:
+        now = iso()
+
+        def operation(connection: Any) -> bool:
+            cursor = connection.execute(
+                f"UPDATE sync_queue SET state='succeeded',completed_at=?,claim_token=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE {self._owned_clause()}",
+                (now, item_id, claim_token, owner, now),
+            )
+            if cursor.rowcount != 1:
+                return False
+            connection.execute(
+                "DELETE FROM local_sessions WHERE singleton=1 AND generation=? AND status='revocation_pending'",
+                (generation,),
             )
             return True
 

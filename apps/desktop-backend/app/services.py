@@ -75,22 +75,32 @@ class AuthService:
             if record is None:
                 return {"logged_out": True, "revocation_pending": False}
             if record.status == "active":
-                generation = await self.sessions.mark_revocation_pending(record.generation)
-                if generation is None:
+                started = await self.sessions.begin_revocation(
+                    record.generation, self.queue.max_attempts, self.queue.lease_seconds
+                )
+                if started is None:
                     raise ConflictError("Session changed during logout")
+                generation, item_id, claim_token = started
             else:
-                generation = record.generation
+                return {"logged_out": True, "revocation_pending": True}
             try:
                 await self.central.logout(record.session)
             except ExternalServiceError as exc:
                 if exc.status_code in {401, 403}:
-                    await self.sessions.clear(generation)
-                    return {"logged_out": True, "revocation_pending": False}
+                    completed = await self.queue.complete_revocation(
+                        item_id, claim_token, "auth-logout", generation
+                    )
+                    return {"logged_out": True, "revocation_pending": not completed}
                 await self.sessions.set_error(generation, exc.code)
-                await self.queue.enqueue_revocation(generation)
+                await self.queue.fail(
+                    item_id, claim_token, "auth-logout", exc.code,
+                    "Central revocation failed", False,
+                )
                 return {"logged_out": True, "revocation_pending": True}
-            await self.sessions.clear(generation)
-            return {"logged_out": True, "revocation_pending": False}
+            completed = await self.queue.complete_revocation(
+                item_id, claim_token, "auth-logout", generation
+            )
+            return {"logged_out": True, "revocation_pending": not completed}
 
     async def authenticate(self, bearer_token: str, session_token: str) -> LocalSession:
         record = await self.sessions.get_record()
@@ -98,6 +108,9 @@ class AuthService:
             raise AuthenticationError("No local session")
         if record.status != "active":
             raise AuthenticationError("Session revocation is pending")
+        if not record.session.license or record.session.license.get("is_active") is False:
+            await self.sessions.clear(record.generation)
+            raise AuthenticationError("License is inactive")
         if record.license_valid_until is None or record.license_valid_until <= datetime.now(UTC):
             await self.sessions.clear(record.generation)
             raise AuthenticationError("License is expired")
@@ -122,6 +135,9 @@ class AuthService:
             if record.license_valid_until is None or record.license_valid_until <= datetime.now(UTC):
                 await self.sessions.clear(record.generation)
                 raise AuthenticationError("License is expired")
+            if not session.license or session.license.get("is_active") is False:
+                await self.sessions.clear(record.generation)
+                raise AuthenticationError("License is inactive")
             try:
                 replacement = await self.central.refresh(session)
             except ExternalServiceError as exc:
@@ -141,6 +157,8 @@ class AuthService:
             return {"valid": False, "authenticated": False, "expires_at": None, "status": "none"}
         valid = (
             record.status == "active"
+            and bool(record.session.license)
+            and record.session.license.get("is_active") is not False
             and record.license_valid_until is not None
             and record.license_valid_until > datetime.now(UTC)
         )
@@ -177,6 +195,8 @@ class CameraService:
         self, session: LocalSession, camera_id: UUID, payload: CameraUpdate
     ) -> dict[str, Any] | None:
         self.authorization.require(session, "camera.update")
+        if payload.analytics_config is not None or payload.zones is not None:
+            self.authorization.require_feature(session, "zone_analytics")
         return await self.repository.update(camera_id, payload)
 
     async def delete(self, session: LocalSession, camera_id: UUID) -> bool:
@@ -252,9 +272,9 @@ class SyncService:
                     except ExternalServiceError as exc:
                         if exc.status_code not in {401, 403}:
                             raise
-                    await self.sessions.clear(int(payload["generation"]))
-                    completed = await self.queue.complete(
-                        item["id"], item["claim_token"], item["lease_owner"]
+                    completed = await self.queue.complete_revocation(
+                        item["id"], item["claim_token"], item["lease_owner"],
+                        int(payload["generation"]),
                     )
                 else:
                     method = payload.get("_method", "POST")

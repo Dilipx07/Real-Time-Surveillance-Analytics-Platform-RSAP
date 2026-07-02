@@ -78,3 +78,10 @@ class AuthorizationService:
         features = license_data.get("features") or {}
         if required not in modules and features.get(required) is not True:
             raise AuthorizationError(f"Analytics module is not licensed: {required}")
+
+    def require_feature(self, session: LocalSession, feature: str) -> None:
+        license_data = self._license(session)
+        modules = set(license_data.get("analytics_modules") or [])
+        features = license_data.get("features") or {}
+        if feature not in modules and features.get(feature) is not True:
+            raise AuthorizationError(f"Feature is not licensed: {feature}")
