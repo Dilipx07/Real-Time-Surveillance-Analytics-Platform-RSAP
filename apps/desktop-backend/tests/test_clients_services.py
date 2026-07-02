@@ -12,7 +12,8 @@ from app.crypto import FieldCipher
 from app.database import Database
 from app.repositories import SessionRepository, SyncQueueRepository
 from app.schemas import LocalSession
-from app.services import AuthService, AuthenticationError
+from app.repositories import iso
+from app.services import AuthService, AuthenticationError, SyncService
 
 
 def response(data, status=200):
@@ -140,6 +141,16 @@ async def test_logout_timeout_is_durable_denies_access_and_survives_service_rest
     with pytest.raises(AuthenticationError, match="revocation is pending"):
         await restarted.authenticate(session.access_token, session.session_token)
     assert await queue.count() == 1
+    await database.write(lambda connection: connection.execute(
+        "UPDATE sync_queue SET next_attempt_at=? WHERE logical_key='session:revoke'", (iso(),)
+    ))
+    success_central = CentralApiClient(
+        settings, httpx.MockTransport(lambda _: response({"logged_out": True}))
+    )
+    sync = SyncService(queue, sessions, success_central, 7, 30)
+    assert (await sync.flush_once("restart-worker"))["synced"] == 1
+    assert await sessions.get_record() is None
+    await success_central.close()
     await central.close()
     await database.close()
 
