@@ -25,6 +25,8 @@ def decode_key(value: SecretStr, name: str) -> bytes:
         raise ValueError(f"{name} must be URL-safe base64") from exc
     if len(decoded) != 32:
         raise ValueError(f"{name} must decode to exactly 32 bytes")
+    if decoded == bytes(32) or len(set(decoded)) < 8:
+        raise ValueError(f"{name} is not valid cryptographic key material")
     return decoded
 
 
@@ -53,6 +55,9 @@ class Settings(BaseSettings):
     retry_attempts: int = Field(default=3, ge=1, le=5)
     retry_base_delay_seconds: float = Field(default=0.25, ge=0, le=5)
     queue_lease_seconds: int = Field(default=60, ge=5, le=600)
+    queue_max_attempts: int = Field(default=8, ge=1, le=100)
+    queue_succeeded_retention_days: int = Field(default=7, ge=1, le=90)
+    queue_dead_letter_retention_days: int = Field(default=30, ge=1, le=365)
     cors_origins: tuple[str, ...] = (
         "tauri://localhost",
         "http://tauri.localhost",
@@ -78,8 +83,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_security(self) -> "Settings":
-        decode_key(self.database_key, "database_key")
-        decode_key(self.field_encryption_key, "field_encryption_key")
+        database_key = decode_key(self.database_key, "database_key")
+        field_key = decode_key(self.field_encryption_key, "field_encryption_key")
+        if database_key == field_key:
+            raise ValueError("database and field encryption keys must be distinct")
         if self.database_driver == "sqlite-test" and self.environment != "test":
             raise ValueError("sqlite-test driver is permitted only in the test environment")
         if self.environment == "production" and not self.central_api_url.startswith("https://"):

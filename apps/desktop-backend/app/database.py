@@ -73,6 +73,12 @@ class Database:
         migrations = sorted(migrations_dir.glob("[0-9][0-9][0-9][0-9]_*.sql"))
         if not migrations:
             raise MigrationError("no desktop database migrations were found")
+        known_versions = [migration.name.split("_", 1)[0] for migration in migrations]
+        if len(known_versions) != len(set(known_versions)):
+            raise MigrationError("duplicate migration versions are not allowed")
+        expected_versions = [f"{value:04d}" for value in range(1, len(known_versions) + 1)]
+        if known_versions != expected_versions:
+            raise MigrationError("migration versions must be contiguous from 0001")
         connection = self.connect()
         try:
             connection.execute("BEGIN EXCLUSIVE")
@@ -83,12 +89,18 @@ class Database:
                        applied_at TEXT NOT NULL
                    )"""
             )
-            applied = {
-                row["version"]: row["checksum"]
-                for row in connection.execute(
-                    "SELECT version, checksum FROM schema_migrations"
-                ).fetchall()
-            }
+            applied_rows = connection.execute(
+                "SELECT version, checksum FROM schema_migrations ORDER BY version"
+            ).fetchall()
+            applied_versions = [row["version"] for row in applied_rows]
+            if len(applied_versions) != len(set(applied_versions)):
+                raise MigrationError("duplicate applied migration versions")
+            unknown = set(applied_versions) - set(known_versions)
+            if unknown:
+                raise MigrationError(f"unknown applied migration versions: {sorted(unknown)}")
+            if applied_versions != known_versions[:len(applied_versions)]:
+                raise MigrationError("applied migration history contains a gap")
+            applied = {row["version"]: row["checksum"] for row in applied_rows}
             for migration in migrations:
                 version = migration.name.split("_", 1)[0]
                 sql = migration.read_text(encoding="utf-8-sig")
