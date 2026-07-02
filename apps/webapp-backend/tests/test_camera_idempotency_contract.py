@@ -20,3 +20,5 @@ def test_camera_create_uses_database_backed_idempotency():
     assert "INSERT INTO va.cameras(id, user_id" in source
     assert "ON CONFLICT (id) DO NOTHING" in source
     assert "SELECT id FROM auth.users WHERE id=$1 FOR UPDATE" in source
+    database_schema = (Path(__file__).parents[3] / "infra" / "postgres" / "init.sql").read_text()
+    assert "CREATE TABLE va.cameras (\n    id UUID PRIMARY KEY" in database_schema

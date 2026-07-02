@@ -20,7 +20,11 @@ def test_startup_api_auth_envelope_and_shutdown(settings):
         session = LocalSession(
             access_token="jwt", session_token="session", refresh_token="refresh",
             access_expires_at=datetime.now(UTC) + timedelta(minutes=15),
-            user={"id": "user-1", "email": "va@example.test", "role": "va_user"},
+            user={"id": "user-1", "email": "va@example.test", "role": "va_user", "permissions": []},
+            license={
+                "valid_until": expiry.isoformat(), "is_active": True, "max_cameras": 2,
+                "analytics_modules": ["intrusion_detection", "people_counting", "zone_analytics"],
+            },
         )
         client.portal.call(container.sessions.save, session, expiry)
 
@@ -42,10 +46,23 @@ def test_startup_api_auth_envelope_and_shutdown(settings):
         assert created.status_code == 201
         camera_id = created.json()["data"]["id"]
         listed = client.get("/cameras", headers=auth_headers())
-        assert listed.json()["data"][0]["id"] == camera_id
+        assert listed.json()["data"]["items"][0]["id"] == camera_id
 
         invalid = client.post("/cameras", headers=auth_headers(), json={})
         assert invalid.status_code == 422
         assert invalid.json()["error"]["code"] == "validation_error"
+
+        for response in (client.get("/missing"), client.put("/health")):
+            assert response.status_code in {404, 405}
+            assert response.json()["success"] is False
+            assert response.json()["data"] is None
+            assert set(response.json()) == {"success", "data", "error"}
+
+        container.database._closed = True
+        failed = client.get("/health")
+        assert failed.status_code == 500
+        assert failed.json()["error"] == {
+            "code": "internal_error", "message": "Internal server error",
+        }
 
     assert container.database._closed is True

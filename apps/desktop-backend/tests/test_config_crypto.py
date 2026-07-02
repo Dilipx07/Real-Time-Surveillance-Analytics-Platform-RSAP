@@ -9,15 +9,15 @@ from app.config import Settings
 from app.crypto import DecryptionError, FieldCipher
 
 
-def key(byte: bytes = b"x") -> str:
-    return base64.urlsafe_b64encode(byte * 32).decode("ascii")
+def key(start: int = 0) -> str:
+    return base64.urlsafe_b64encode(bytes(range(start, start + 32))).decode("ascii")
 
 
 def base(**overrides):
     values = {
         "environment": "production",
-        "database_key": key(b"d"),
-        "field_encryption_key": key(b"f"),
+        "database_key": key(0),
+        "field_encryption_key": key(32),
         "central_api_url": "https://central.example",
     }
     values.update(overrides)
@@ -28,6 +28,9 @@ def base(**overrides):
     "overrides",
     [
         {"database_key": "short"},
+        {"database_key": base64.urlsafe_b64encode(bytes(32)).decode()},
+        {"database_key": base64.urlsafe_b64encode(b"x" * 32).decode()},
+        {"field_encryption_key": key(0)},
         {"host": "0.0.0.0"},
         {"central_api_url": "https://user:password@central.example"},
         {"central_api_url": "http://central.example"},
@@ -47,13 +50,15 @@ def test_plaintext_driver_is_explicitly_test_only(tmp_path):
     assert settings.database_driver == "sqlite-test"
 
 
-def test_field_cipher_binds_ciphertext_to_purpose_and_detects_tampering():
-    cipher = FieldCipher(b"k" * 32)
-    encrypted = cipher.encrypt("rtsp://user:secret@example/cam", "camera:1")
-    assert "secret" not in encrypted
-    assert cipher.decrypt(encrypted, "camera:1").startswith("rtsp://")
+def test_field_cipher_binds_ciphertext_to_purpose_uses_unique_nonces_and_detects_tampering():
+    cipher = FieldCipher(bytes(range(32)))
+    first = cipher.encrypt("rtsp://user:secret@example/cam", "camera:1")
+    second = cipher.encrypt("rtsp://user:secret@example/cam", "camera:1")
+    assert first != second
+    assert "secret" not in first
+    assert cipher.decrypt(first, "camera:1").startswith("rtsp://")
     with pytest.raises(DecryptionError):
-        cipher.decrypt(encrypted, "camera:2")
-    damaged = encrypted[:-2] + ("AA" if encrypted[-2:] != "AA" else "BB")
+        cipher.decrypt(first, "camera:2")
+    damaged = first[:-2] + ("AA" if first[-2:] != "AA" else "BB")
     with pytest.raises(DecryptionError):
         cipher.decrypt(damaged, "camera:1")
