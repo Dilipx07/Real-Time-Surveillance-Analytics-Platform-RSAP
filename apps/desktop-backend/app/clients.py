@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from app.config import Settings
-from app.schemas import LocalSession
+from app.schemas import FileUploadResult, LocalSession
 
 
 class ExternalServiceError(RuntimeError):
@@ -101,6 +101,7 @@ class CentralApiClient:
         if not isinstance(expires_in, int) or expires_in <= 0:
             raise ExternalServiceError("invalid_response", "Central token lifetime is invalid", 502)
         data["access_expires_at"] = datetime.now(UTC) + timedelta(seconds=expires_in)
+        data.pop("expires_in", None)
         return LocalSession.model_validate(data)
 
     async def refresh(self, session: LocalSession) -> LocalSession:
@@ -168,6 +169,8 @@ class FileServerClient:
     ) -> None:
         if not service_token:
             raise ValueError("file service token is required")
+        if not 0 < timeout_seconds <= 60:
+            raise ValueError("file service timeout must be between 0 and 60 seconds")
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"), timeout=timeout_seconds, transport=transport,
             headers={"X-Service-Token": service_token}, follow_redirects=False,
@@ -179,7 +182,15 @@ class FileServerClient:
         )
         if response.is_error:
             raise ExternalServiceError("file_upload_failed", "File service rejected capture", response.status_code)
-        return response.json()
+        response_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+        if response_type != "application/json":
+            raise ExternalServiceError("invalid_file_response", "File service returned an invalid content type", 502)
+        try:
+            body = response.json()
+            validated = FileUploadResult.model_validate(body)
+        except (ValueError, TypeError) as exc:
+            raise ExternalServiceError("invalid_file_response", "File service returned an invalid response", 502) from exc
+        return validated.model_dump(mode="json")
 
     async def close(self) -> None:
         await self._client.aclose()
