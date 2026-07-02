@@ -166,3 +166,23 @@ async def test_session_cache_is_encrypted_versioned_and_revocation_pending(repos
     generation = await sessions.mark_revocation_pending(record.generation)
     assert generation == record.generation + 1
     assert (await sessions.get_record()).status == "revocation_pending"
+
+
+@pytest.mark.asyncio
+async def test_new_session_cancels_old_pending_revocation(repositories):
+    database, _, _, queue, sessions = repositories
+    expiry = datetime.now(UTC) + timedelta(hours=1)
+    old = LocalSession(
+        access_token="old", session_token="old-session", refresh_token="old-refresh",
+        access_expires_at=datetime.now(UTC) + timedelta(minutes=5), user={"id": "u"},
+    )
+    record = await sessions.save(old, expiry)
+    started = await sessions.begin_revocation(record.generation, 3, 30)
+    assert started is not None
+    await queue.fail(started[1], started[2], "auth-logout", "offline", "safe", False)
+    replacement = old.model_copy(update={"access_token": "new", "session_token": "new-session"})
+    await sessions.save(replacement, expiry)
+    state = await database.read(lambda connection: connection.execute(
+        "SELECT state FROM sync_queue WHERE logical_key='session:revoke' ORDER BY version DESC LIMIT 1"
+    ).fetchone()[0])
+    assert state == "cancelled"

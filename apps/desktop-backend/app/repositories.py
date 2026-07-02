@@ -134,6 +134,12 @@ class SessionRepository:
                     iso(), generation,
                 ),
             )
+            connection.execute(
+                """UPDATE sync_queue SET state='cancelled',completed_at=?
+                   WHERE logical_key='session:revoke'
+                     AND state IN ('pending','retry_wait','dead_letter')""",
+                (iso(),),
+            )
             return connection.execute("SELECT * FROM local_sessions WHERE singleton=1").fetchone()
 
         return self._record(await self.database.write(operation))
@@ -362,7 +368,11 @@ class CameraRepository:
                 (f"camera:{identifier}",),
             ).fetchone()
             if row["server_id"] is None and latest and latest["state"] in {"pending", "retry_wait"}:
-                connection.execute("UPDATE sync_queue SET state='cancelled', completed_at=? WHERE id=?", (iso(), latest["id"]))
+                connection.execute(
+                    """UPDATE sync_queue SET state='cancelled',completed_at=?
+                       WHERE (id=? OR depends_on_id=?) AND state IN ('pending','retry_wait')""",
+                    (iso(), latest["id"], latest["id"]),
+                )
             else:
                 _enqueue(
                     connection, f"/api/v1/cameras/{identifier}",

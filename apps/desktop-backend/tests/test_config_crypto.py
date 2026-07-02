@@ -30,6 +30,8 @@ def base(**overrides):
         {"database_key": "short"},
         {"database_key": base64.urlsafe_b64encode(bytes(32)).decode()},
         {"database_key": base64.urlsafe_b64encode(b"x" * 32).decode()},
+        {"database_key": base64.urlsafe_b64encode(b"change_me_placeholder_material_32"[:32]).decode()},
+        {"database_key": key(0) + "!"},
         {"field_encryption_key": key(0)},
         {"host": "0.0.0.0"},
         {"central_api_url": "https://user:password@central.example"},

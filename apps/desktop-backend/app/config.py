@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -20,13 +21,16 @@ def decode_key(value: SecretStr, name: str) -> bytes:
     """Decode an exact 256-bit URL-safe base64 secret."""
     raw = value.get_secret_value().encode("ascii")
     try:
-        decoded = base64.urlsafe_b64decode(raw + b"=" * (-len(raw) % 4))
-    except (ValueError, UnicodeEncodeError) as exc:
+        decoded = base64.b64decode(raw + b"=" * (-len(raw) % 4), altchars=b"-_", validate=True)
+    except (ValueError, UnicodeEncodeError, binascii.Error) as exc:
         raise ValueError(f"{name} must be URL-safe base64") from exc
     if len(decoded) != 32:
         raise ValueError(f"{name} must decode to exactly 32 bytes")
     if decoded == bytes(32) or len(set(decoded)) < 8:
         raise ValueError(f"{name} is not valid cryptographic key material")
+    lowered = decoded.lower()
+    if any(marker in lowered for marker in (b"change", b"placeholder", b"example", b"default")):
+        raise ValueError(f"{name} contains placeholder key material")
     return decoded
 
 
