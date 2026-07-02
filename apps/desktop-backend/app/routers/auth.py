@@ -25,8 +25,7 @@ async def login(
 async def logout(
     _: CurrentSession, container: Annotated[Any, Depends(get_container)]
 ) -> dict[str, Any]:
-    await container.auth.logout()
-    return envelope({"logged_out": True})
+    return envelope(await container.auth.logout())
 
 
 @router.post("/refresh")
