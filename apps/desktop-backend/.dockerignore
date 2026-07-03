@@ -17,6 +17,9 @@
 **/.env.*
 **/.validation-*
 **/validation-*
+**/.verify-*
+**/verify-*
+**/.tox
 tests/
 requirements-dev.txt
 pytest.ini

@@ -32,8 +32,9 @@ Required environment variables are `RSAP_DATABASE_KEY`,
 
 Camera IDs are canonical client-generated UUIDs. The desktop persists the UUID
 before the first central request, Agent-1 inserts that UUID as `va.cameras.id`, and
-repeated creates use the primary key as the durable idempotency boundary. Analytics
-DTOs use that same UUID.
+repeated identical creates use the primary key as the durable idempotency boundary.
+A retry with the same UUID but different camera fields is rejected with `409`.
+Analytics DTOs use that same UUID.
 
 Outgoing events, alerts, and people counts are mapped to explicit central DTOs.
 Local paths are never sent as central file identifiers. A capture with a local path
@@ -53,7 +54,9 @@ Only transient failures retry. Permanent 4xx/contract failures dead-letter
 immediately; transient failures dead-letter after `RSAP_QUEUE_MAX_ATTEMPTS`.
 Backoff is bounded at 300 seconds. Succeeded/cancelled rows default to seven-day
 retention and dead letters to thirty days. `/sync/dead-letters` exposes redacted
-failure details and administrator retry/discard operations.
+failure details and administrator retry/discard operations. Retention detaches
+completed dependency chains and cancels descendants of expired dead letters so
+historical references cannot make the queue grow forever.
 
 Agent-3 schedules `SyncService.flush_once()`; this foundation starts no scheduler.
 
@@ -104,6 +107,10 @@ are rejected before application services start. Upgrades are forward-only.
 The image runs as UID 10001, exposes container port 8000, binds Uvicorn to
 `0.0.0.0:8000`, and includes a `/health` healthcheck. Recursive ignore rules exclude
 databases, environments, caches, validation artifacts, credentials, and key files.
+Its sole writable runtime location is `/home/rsap/.rsap`; the image creates that
+directory with mode `0700` and configures the database as
+`/home/rsap/.rsap/local.db`. Mount persistent storage only at
+`/home/rsap/.rsap` and do not place runtime data under `/app`.
 Production desktop installation remains an OS-local service on `127.0.0.1:8001`.
 
 ## Development
