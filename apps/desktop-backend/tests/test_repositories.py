@@ -106,6 +106,30 @@ async def test_event_waits_for_camera_and_uses_canonical_central_contract(reposi
 
 
 @pytest.mark.asyncio
+async def test_successful_analytics_queue_completion_marks_local_record_synced(repositories):
+    database, cameras, analytics, queue, _ = repositories
+    camera = await cameras.create(
+        CameraCreate(name="Gate", stream_url="0", stream_type="webcam"), 2
+    )
+    create_item = (await queue.claim("worker", 1))[0]
+    assert await queue.complete_camera(
+        create_item["id"], create_item["claim_token"], "worker",
+        camera["id"], camera["id"],
+    )
+    event = await analytics.add_event(AnalyticsEventCreate(
+        camera_id=UUID(camera["id"]), event_type="zone_enter", payload={}
+    ))
+    event_item = (await queue.claim("worker", 1))[0]
+    assert await queue.complete(
+        event_item["id"], event_item["claim_token"], "worker"
+    )
+    synced = await database.read(lambda connection: connection.execute(
+        "SELECT synced FROM local_analytics_events WHERE id=?", (str(event["id"]),)
+    ).fetchone()[0])
+    assert synced == 1
+
+
+@pytest.mark.asyncio
 async def test_concurrent_queue_claims_do_not_duplicate_work(repositories):
     _, cameras, _, queue, _ = repositories
     for index in range(8):
@@ -147,6 +171,44 @@ async def test_transient_failure_exhaustion_dead_letters_and_can_be_discarded(re
     assert await queue.dead_letter_count() == 1
     assert await queue.discard_dead_letter(item_id)
     assert await queue.dead_letter_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_retention_prunes_completed_chains_and_bounds_dead_letter_descendants(repositories):
+    database, cameras, _, queue, _ = repositories
+    created = await cameras.create(
+        CameraCreate(name="Gate", stream_url="0", stream_type="webcam"), 2
+    )
+    first = (await queue.claim("worker", 1))[0]
+    await cameras.update(created["id"], CameraUpdate(name="Renamed"))
+    assert await queue.complete_camera(
+        first["id"], first["claim_token"], "worker", created["id"], created["id"]
+    )
+    old = iso(datetime.now(UTC) - timedelta(days=40))
+    await database.write(lambda connection: connection.execute(
+        "UPDATE sync_queue SET completed_at=? WHERE id=?", (old, first["id"])
+    ))
+    assert await queue.purge_retained(7, 30) == 1
+    successor = await database.read(lambda connection: connection.execute(
+        "SELECT predecessor_id FROM sync_queue WHERE logical_key=?",
+        (f"camera:{created['id']}",),
+    ).fetchone())
+    assert successor["predecessor_id"] is None
+
+    item = (await queue.claim("worker", 1))[0]
+    assert await queue.fail(
+        item["id"], item["claim_token"], "worker", "contract", "safe", True
+    )
+    await cameras.update(created["id"], CameraUpdate(name="Blocked successor"))
+    await database.write(lambda connection: connection.execute(
+        "UPDATE sync_queue SET failed_at=? WHERE id=?", (old, item["id"])
+    ))
+    assert await queue.purge_retained(7, 30) == 1
+    states = await database.read(lambda connection: connection.execute(
+        "SELECT state,predecessor_id FROM sync_queue ORDER BY version"
+    ).fetchall())
+    assert states[-1]["state"] == "cancelled"
+    assert states[-1]["predecessor_id"] is None
 
 
 @pytest.mark.asyncio

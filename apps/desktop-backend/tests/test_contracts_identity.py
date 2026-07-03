@@ -118,3 +118,44 @@ async def test_camera_idempotency_reconciles_after_lost_response_and_restart(set
     stored = await cameras.get(UUID(camera["id"]))
     assert stored["server_id"] == camera["id"]
     await database.close()
+
+
+@pytest.mark.asyncio
+async def test_camera_delete_retry_treats_central_not_found_as_converged(settings):
+    database = Database(settings)
+    await database.migrate()
+    cipher = FieldCipher(settings.field_encryption_key_bytes)
+    cameras = CameraRepository(database, cipher, 3)
+    sessions = SessionRepository(database, cipher)
+    queue = SyncQueueRepository(database, 30, 3)
+    expiry = datetime.now(UTC) + timedelta(hours=1)
+    session = LocalSession(
+        access_token="access", refresh_token="refresh", session_token="session",
+        access_expires_at=datetime.now(UTC) + timedelta(minutes=15),
+        user={"id": "user", "role": "va_user"},
+        license={"valid_until": expiry.isoformat(), "is_active": True, "max_cameras": 2},
+    )
+    await sessions.save(session, expiry)
+    camera = await cameras.create(
+        CameraCreate(name="Gate", stream_url="0", stream_type="webcam"), 2
+    )
+    create_item = (await queue.claim("setup", 1))[0]
+    assert await queue.complete_camera(
+        create_item["id"], create_item["claim_token"], "setup",
+        camera["id"], camera["id"],
+    )
+    assert await cameras.delete(camera["id"])
+
+    class AlreadyDeletedCentral:
+        async def request(self, method, path, session, body=None):
+            raise ExternalServiceError("central_rejected", "not found", 404, False)
+
+        async def logout(self, session):
+            return None
+
+    result = await SyncService(
+        queue, sessions, AlreadyDeletedCentral(), 7, 30
+    ).flush_once("delete-retry")
+    assert result["synced"] == 1
+    assert await queue.dead_letter_count() == 0
+    await database.close()

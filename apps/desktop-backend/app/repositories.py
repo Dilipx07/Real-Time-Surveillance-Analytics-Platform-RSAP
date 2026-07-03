@@ -612,10 +612,36 @@ class SyncQueueRepository:
 
     async def complete(self, item_id: str, claim_token: str, owner: str) -> bool:
         now = iso()
-        return await self.database.write(lambda connection: connection.execute(
-            f"UPDATE sync_queue SET state='succeeded',completed_at=?,claim_token=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE {self._owned_clause()}",
-            (now, item_id, claim_token, owner, now),
-        ).rowcount == 1)
+
+        def operation(connection: Any) -> bool:
+            row = connection.execute(
+                f"SELECT logical_key FROM sync_queue WHERE {self._owned_clause()}",
+                (item_id, claim_token, owner, now),
+            ).fetchone()
+            if row is None:
+                return False
+            cursor = connection.execute(
+                f"UPDATE sync_queue SET state='succeeded',completed_at=?,claim_token=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE {self._owned_clause()}",
+                (now, item_id, claim_token, owner, now),
+            )
+            if cursor.rowcount != 1:
+                return False
+            logical_key = str(row["logical_key"])
+            table = None
+            if logical_key.startswith("event:"):
+                table = "local_analytics_events"
+            elif logical_key.startswith("alert:"):
+                table = "local_alerts"
+            elif logical_key.startswith("count:"):
+                table = "local_people_counts"
+            if table is not None:
+                connection.execute(
+                    f"UPDATE {table} SET synced=1 WHERE id=?",
+                    (logical_key.split(":", 1)[1],),
+                )
+            return True
+
+        return await self.database.write(operation)
 
     async def complete_camera(
         self, item_id: str, claim_token: str, owner: str, local_id: str, server_id: str
@@ -723,14 +749,54 @@ class SyncQueueRepository:
         dead_before = iso(utc_now() - timedelta(days=dead_letter_days))
 
         def operation(connection: Any) -> int:
-            cursor = connection.execute(
-                """DELETE FROM sync_queue WHERE (
+            candidates = connection.execute(
+                """SELECT id,state FROM sync_queue WHERE
                      (state IN ('succeeded','cancelled') AND completed_at < ?)
-                     OR (state='dead_letter' AND failed_at < ?))
-                   AND id NOT IN (SELECT predecessor_id FROM sync_queue WHERE predecessor_id IS NOT NULL)
-                   AND id NOT IN (SELECT depends_on_id FROM sync_queue WHERE depends_on_id IS NOT NULL)""",
+                     OR (state='dead_letter' AND failed_at < ?)
+                   ORDER BY created_at,id""",
                 (succeeded_before, dead_before),
-            )
-            return cursor.rowcount
+            ).fetchall()
+            removed = 0
+            for candidate in candidates:
+                item_id, state = candidate["id"], candidate["state"]
+                if state == "dead_letter":
+                    descendants = connection.execute(
+                        """WITH RECURSIVE descendants(id) AS (
+                               SELECT id FROM sync_queue
+                                WHERE predecessor_id=? OR depends_on_id=?
+                               UNION
+                               SELECT q.id FROM sync_queue q JOIN descendants d
+                                 ON q.predecessor_id=d.id OR q.depends_on_id=d.id
+                           ) SELECT id FROM descendants""",
+                        (item_id, item_id),
+                    ).fetchall()
+                    descendant_ids = [row["id"] for row in descendants]
+                    if descendant_ids:
+                        placeholders = ",".join("?" for _ in descendant_ids)
+                        connection.execute(
+                            f"""UPDATE sync_queue SET state='cancelled',completed_at=?,
+                                   claim_token=NULL,lease_owner=NULL,lease_expires_at=NULL
+                                WHERE id IN ({placeholders}) AND state!='inflight'""",
+                            (iso(), *descendant_ids),
+                        )
+                elif state == "cancelled":
+                    connection.execute(
+                        """UPDATE sync_queue SET state='cancelled',completed_at=?,
+                               claim_token=NULL,lease_owner=NULL,lease_expires_at=NULL
+                           WHERE depends_on_id=? AND state!='inflight'""",
+                        (iso(), item_id),
+                    )
+                connection.execute(
+                    "UPDATE sync_queue SET predecessor_id=NULL WHERE predecessor_id=?",
+                    (item_id,),
+                )
+                connection.execute(
+                    "UPDATE sync_queue SET depends_on_id=NULL WHERE depends_on_id=?",
+                    (item_id,),
+                )
+                removed += connection.execute(
+                    "DELETE FROM sync_queue WHERE id=?", (item_id,)
+                ).rowcount
+            return removed
 
         return await self.database.write(operation)
