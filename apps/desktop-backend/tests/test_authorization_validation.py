@@ -37,6 +37,57 @@ def test_authorization_allows_read_routes_and_exposes_camera_limit():
 
 
 @pytest.mark.parametrize(
+    ("role", "permission", "allowed"),
+    [
+        ("va_user", "camera.read", True),
+        ("va_user", "camera.create", True),
+        ("va_user", "camera.update", True),
+        ("va_user", "camera.delete", True),
+        ("va_user", "analytics.read", True),
+        ("va_user", "analytics.write", True),
+        ("va_user", "persons.read", True),
+        ("va_user", "persons.write", False),
+        ("va_user", "sync.read", True),
+        ("staff", "persons.read", True),
+        ("staff", "persons.write", True),
+        ("unknown", "camera.read", False),
+    ],
+)
+def test_permission_matrix_is_explicit_and_deny_by_default(role, permission, allowed):
+    authorization = AuthorizationService()
+    if allowed:
+        authorization.require(session(role), permission)
+    else:
+        with pytest.raises(AuthorizationError):
+            authorization.require(session(role), permission)
+
+
+def test_central_wildcard_grants_are_supported_but_malformed_grants_deny():
+    authorization = AuthorizationService()
+    granted = session("unknown")
+    granted.user["permissions"] = [{"resource": "cameras", "actions": ["*"]}]
+    authorization.require(granted, "camera.read")
+    denied = session("unknown")
+    denied.user["permissions"] = ["malformed"]
+    with pytest.raises(AuthorizationError):
+        authorization.require(denied, "camera.read")
+
+
+@pytest.mark.parametrize(
+    "license_data",
+    [
+        {"valid_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat()},
+        {"valid_until": "2030-01-01T00:00:00", "is_active": True},
+    ],
+)
+def test_incomplete_or_naive_licence_data_fails_closed(license_data):
+    candidate = session()
+    candidate.license = license_data
+    with pytest.raises(AuthorizationError):
+        AuthorizationService().require(candidate, "camera.read")
+
+
+@pytest.mark.parametrize(
     "payload",
     [
         {}, {"name": None}, {"stream_url": None}, {"stream_type": None},

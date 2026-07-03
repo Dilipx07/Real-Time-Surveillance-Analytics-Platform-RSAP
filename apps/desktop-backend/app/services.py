@@ -56,8 +56,18 @@ class AuthService:
                 expiry_value = license_data.get("valid_until")
                 if not isinstance(expiry_value, str):
                     raise ExternalServiceError("invalid_response", "Central licence expiry is missing", 502)
-                expiry = datetime.fromisoformat(expiry_value.replace("Z", "+00:00")).astimezone(UTC)
-                if expiry <= datetime.now(UTC) or not license_data.get("is_active", True):
+                try:
+                    parsed_expiry = datetime.fromisoformat(expiry_value.replace("Z", "+00:00"))
+                except ValueError as exc:
+                    raise ExternalServiceError(
+                        "invalid_response", "Central licence expiry is invalid", 502
+                    ) from exc
+                if parsed_expiry.tzinfo is None:
+                    raise ExternalServiceError(
+                        "invalid_response", "Central licence expiry must include a timezone", 502
+                    )
+                expiry = parsed_expiry.astimezone(UTC)
+                if expiry <= datetime.now(UTC) or license_data.get("is_active") is not True:
                     raise AuthenticationError("License is inactive or expired")
                 session.license = license_data
                 await self.sessions.save(session, expiry)
@@ -267,6 +277,14 @@ class SyncService:
             payload = item["payload"]
             try:
                 if payload.get("_kind") == "session_revoke":
+                    generation = int(payload["generation"])
+                    if record.status != "revocation_pending" or generation != record.generation:
+                        completed = await self.queue.complete(
+                            item["id"], item["claim_token"], item["lease_owner"]
+                        )
+                        if completed:
+                            synced += 1
+                        continue
                     try:
                         await self.central.logout(record.session)
                     except ExternalServiceError as exc:
@@ -274,14 +292,24 @@ class SyncService:
                             raise
                     completed = await self.queue.complete_revocation(
                         item["id"], item["claim_token"], item["lease_owner"],
-                        int(payload["generation"]),
+                        generation,
                     )
                 else:
                     method = payload.get("_method", "POST")
                     body = payload.get("body", payload)
                     data: Any = {}
                     if method != "PATCH" or body:
-                        data = await self.central.request(method, item["endpoint"], record.session, body)
+                        try:
+                            data = await self.central.request(
+                                method, item["endpoint"], record.session, body
+                            )
+                        except ExternalServiceError as exc:
+                            if not (
+                                payload.get("_kind") == "camera"
+                                and method == "DELETE"
+                                and exc.status_code == 404
+                            ):
+                                raise
                     analytics = payload.get("analytics")
                     if analytics:
                         await self.central.request(

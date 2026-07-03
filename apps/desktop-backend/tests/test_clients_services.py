@@ -66,6 +66,28 @@ async def test_login_fetches_license_and_caches_encrypted_session(settings):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("expiry", ["not-a-date", "2030-01-01T00:00:00"])
+async def test_login_rejects_invalid_or_naive_central_licence_expiry(settings, expiry):
+    async def handler(request: httpx.Request):
+        if request.url.path.endswith("/auth/login"):
+            return response({
+                "access_token": "jwt", "refresh_token": "refresh",
+                "session_token": "session", "token_type": "bearer", "expires_in": 900,
+                "user": {"id": "user-1", "role": "va_user"},
+            })
+        if request.url.path.endswith("/auth/logout"):
+            return response({"logged_out": True})
+        return response({"valid_until": expiry, "is_active": True, "max_cameras": 2})
+
+    database, _, _, central, auth = await auth_parts(settings, handler)
+    with pytest.raises(ExternalServiceError) as raised:
+        await auth.login("va@example.test", "password")
+    assert raised.value.code == "invalid_response"
+    await central.close()
+    await database.close()
+
+
+@pytest.mark.asyncio
 async def test_bounded_retries_stop_after_configured_attempts(settings):
     calls = 0
 
@@ -95,6 +117,24 @@ async def test_login_is_not_retried_because_it_rotates_central_session(settings)
     with pytest.raises(ExternalServiceError):
         await client.login("user@example.test", "never-log-this-password")
     assert calls == 1
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_central_client_rejects_unexpected_content_type(settings):
+    client = CentralApiClient(
+        settings,
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                text='{"success":true,"data":{},"error":null}',
+                headers={"content-type": "text/plain"},
+            )
+        ),
+    )
+    with pytest.raises(ExternalServiceError) as raised:
+        await client.request("GET", "/api/v1/cameras/", local_session())
+    assert raised.value.code == "invalid_response"
     await client.close()
 
 
@@ -179,6 +219,40 @@ async def test_refresh_racing_logout_cannot_resurrect_session(settings):
     await refresh_task
     assert (await logout_task)["logged_out"]
     assert await sessions.get_record() is None
+    await central.close()
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_revocation_work_cannot_revoke_a_new_login(settings):
+    logout_calls = 0
+
+    async def handler(request: httpx.Request):
+        nonlocal logout_calls
+        if request.url.path.endswith("/auth/logout"):
+            logout_calls += 1
+        return response({"logged_out": True})
+
+    database, sessions, queue, central, _ = await auth_parts(settings, handler)
+    expiry = datetime.now(UTC) + timedelta(hours=1)
+    old = await sessions.save(local_session(), expiry)
+    started = await sessions.begin_revocation(old.generation, 3, 30)
+    assert started is not None
+    replacement = local_session().model_copy(update={
+        "access_token": "new-access",
+        "refresh_token": "new-refresh",
+        "session_token": "new-session",
+    })
+    current = await sessions.save(replacement, expiry)
+    await database.write(lambda connection: connection.execute(
+        "UPDATE sync_queue SET lease_expires_at=? WHERE id=?",
+        (iso(datetime.now(UTC) - timedelta(seconds=1)), started[1]),
+    ))
+    sync = SyncService(queue, sessions, central, 7, 30)
+    result = await sync.flush_once("recovery-worker")
+    assert result["synced"] == 1
+    assert logout_calls == 0
+    assert (await sessions.get_record()).generation == current.generation
     await central.close()
     await database.close()
 

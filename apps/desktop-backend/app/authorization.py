@@ -30,15 +30,18 @@ RESOURCE_NAMES = {
 class AuthorizationService:
     def _license(self, session: LocalSession) -> dict[str, Any]:
         license_data = session.license
-        if not isinstance(license_data, dict) or license_data.get("is_active") is False:
+        if not isinstance(license_data, dict) or license_data.get("is_active") is not True:
             raise AuthorizationError("License is inactive")
         expiry = license_data.get("valid_until")
         if not isinstance(expiry, str):
             raise AuthorizationError("License expiry is unavailable")
         try:
-            expires_at = datetime.fromisoformat(expiry.replace("Z", "+00:00")).astimezone(UTC)
+            parsed_expiry = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
         except ValueError as exc:
             raise AuthorizationError("License expiry is invalid") from exc
+        if parsed_expiry.tzinfo is None:
+            raise AuthorizationError("License expiry must include a timezone")
+        expires_at = parsed_expiry.astimezone(UTC)
         if expires_at <= datetime.now(UTC):
             raise AuthorizationError("License is expired")
         return license_data
@@ -52,14 +55,21 @@ class AuthorizationService:
         resource, action = permission.split(".", 1)
         central_resource = RESOURCE_NAMES.get(resource, resource)
         for grant in session.user.get("permissions", []):
-            if grant.get("resource") == central_resource and action in grant.get("actions", []):
+            if not isinstance(grant, dict):
+                continue
+            actions = grant.get("actions")
+            if (
+                grant.get("resource") in {central_resource, "*"}
+                and isinstance(actions, list)
+                and (action in actions or "*" in actions)
+            ):
                 return
         raise AuthorizationError("Insufficient permission")
 
     def max_cameras(self, session: LocalSession) -> int:
         license_data = self._license(session)
         value = license_data.get("max_cameras")
-        if not isinstance(value, int) or value < 1:
+        if type(value) is not int or value < 1:
             raise AuthorizationError("Camera entitlement is unavailable")
         return value
 
