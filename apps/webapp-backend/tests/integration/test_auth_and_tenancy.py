@@ -465,8 +465,13 @@ def test_camera_create_idempotency_conflict_tenant_isolation_and_concurrency(see
         cross_tenant = client.post(
             "/api/v1/cameras/", headers=headers(other), json=payload
         )
-        assert cross_tenant.status_code == 409
-        assert cross_tenant.json()["error"] == conflict.json()["error"]
+        unrelated = client.post(
+            "/api/v1/cameras/",
+            headers=headers(other),
+            json={**payload, "id": str(uuid4())},
+        )
+        assert cross_tenant.status_code == unrelated.status_code == 403
+        assert cross_tenant.json()["error"] == unrelated.json()["error"]
 
     async def camera_count():
         connection = await asyncpg.connect(
