@@ -20,13 +20,27 @@ def public_camera(row: asyncpg.Record) -> dict:
     return result
 
 
+def camera_create_matches(row: asyncpg.Record, payload: CameraCreate) -> bool:
+    """Return whether an existing row is the exact idempotent create result."""
+    return (
+        row["name"] == payload.name
+        and decrypt_text(row["stream_url_encrypted"]) == payload.stream_url
+        and row["stream_type"] == payload.stream_type
+        and row["location_label"] == payload.location_label
+        and row["analytics_config"] == payload.analytics_config
+        and row["zones"] == payload.zones
+    )
+
+
 @router.post("/", status_code=201, response_model=SuccessEnvelope)
 async def create_camera(payload: CameraCreate, request: Request, user: CurrentUserDep, db: asyncpg.Connection = Depends(get_db)):
     authorize(user, "cameras", "create", owner_id=user.id)
     async with db.transaction():
         await db.fetchrow("SELECT id FROM auth.users WHERE id=$1 FOR UPDATE", user.id)
         row = await db.fetchrow(f"SELECT {CAMERA_COLUMNS} FROM va.cameras WHERE id=$1", payload.id)
-        if row is not None and row["user_id"] != user.id:
+        if row is not None and (
+            row["user_id"] != user.id or not camera_create_matches(row, payload)
+        ):
             raise HTTPException(status_code=409, detail="Camera ID is already in use")
         if row is None:
             license_row = await db.fetchrow(
@@ -49,7 +63,11 @@ async def create_camera(payload: CameraCreate, request: Request, user: CurrentUs
             )
             if row is None:
                 row = await db.fetchrow(f"SELECT {CAMERA_COLUMNS} FROM va.cameras WHERE id=$1", payload.id)
-                if row is None or row["user_id"] != user.id:
+                if (
+                    row is None
+                    or row["user_id"] != user.id
+                    or not camera_create_matches(row, payload)
+                ):
                     raise HTTPException(status_code=409, detail="Camera ID is already in use")
             else:
                 await write_audit_log(db, request, user, "create", "va.camera", row["id"])
