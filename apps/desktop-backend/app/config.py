@@ -95,6 +95,8 @@ class Settings(BaseSettings):
             raise ValueError("sqlite-test driver is permitted only in the test environment")
         if self.environment == "production" and not self.central_api_url.startswith("https://"):
             raise ValueError("production central_api_url must use HTTPS")
+        if not self.data_dir.is_absolute():
+            raise ValueError("data_dir must be absolute")
         if self.database_path is None:
             self.database_path = self.data_dir / "local.db"
         elif not self.database_path.is_absolute():

@@ -37,6 +37,7 @@ def base(**overrides):
         {"central_api_url": "https://user:password@central.example"},
         {"central_api_url": "http://central.example"},
         {"database_driver": "sqlite-test"},
+        {"data_dir": "relative-data"},
     ],
 )
 def test_invalid_production_configuration_is_rejected(overrides):

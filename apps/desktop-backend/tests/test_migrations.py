@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import sqlite3
 from pathlib import Path
@@ -130,9 +131,30 @@ async def test_sqlcipher_file_is_not_plain_sqlite(settings, tmp_path):
     database = Database(secure)
     await database.migrate()
     await database.verify()
+    await database.write(lambda connection: connection.execute(
+        "INSERT INTO local_runtime_state VALUES(?, ?, ?)",
+        ("probe", '"sensitive-runtime-value"', "2030-01-01T00:00:00Z"),
+    ))
+    await database.close()
+    raw = secure.database_path.read_bytes()
+    assert b"schema_migrations" not in raw
+    assert b"sensitive-runtime-value" not in raw
     with pytest.raises(sqlite3.DatabaseError):
         plain = sqlite3.connect(secure.database_path)
         try:
             plain.execute("SELECT * FROM schema_migrations").fetchall()
         finally:
             plain.close()
+
+    wrong_key = base64.urlsafe_b64encode(bytes(range(64, 96))).decode("ascii")
+    wrong_settings = Settings(
+        environment="test", database_driver="sqlcipher",
+        database_key=wrong_key,
+        field_encryption_key=settings.field_encryption_key,
+        database_path=secure.database_path,
+        data_dir=tmp_path,
+        central_api_url="http://central.test",
+    )
+    wrong_database = Database(wrong_settings)
+    with pytest.raises(Exception, match="encrypted|database|file"):
+        await wrong_database.verify()

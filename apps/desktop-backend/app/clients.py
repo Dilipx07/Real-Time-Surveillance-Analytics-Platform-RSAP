@@ -48,6 +48,14 @@ class CentralApiClient:
 
     @staticmethod
     def _unwrap(response: httpx.Response) -> Any:
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+        if content_type != "application/json":
+            raise ExternalServiceError(
+                "invalid_response",
+                "Central service returned an invalid content type",
+                502,
+                response.status_code >= 500,
+            )
         try:
             body = response.json()
         except ValueError as exc:
