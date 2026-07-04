@@ -1,13 +1,12 @@
 # Desktop orchestration contracts
 
-This module owns process-local camera worker lifecycle, CV pipeline ownership,
-bounded event routing, desired-state reconciliation, metrics, and health state.
-It does not own SQLCipher schemas, authentication, FastAPI routes, central sync,
-or desktop UI code.
+This module owns process-local camera lifecycle, CV pipeline ownership, bounded
+event routing, desired-state reconciliation, status snapshots, and health. It
+does not own SQLCipher, authentication, FastAPI routes, central sync, or UI.
 
-## Lifecycle
+## Lifecycle and locking
 
-The observable worker states are:
+The guarded state machine is:
 
 ```text
 STOPPED -> STARTING -> RUNNING <-> RECONNECTING
@@ -16,86 +15,135 @@ STOPPED -> STARTING -> RUNNING <-> RECONNECTING
               +-----------+-------------+-------------> FAILED
 ```
 
-`CameraWorkerManager` serializes lifecycle mutations and stores at most one
-worker for a camera ID. Concurrent starts return the same generation. Restart
-awaits complete shutdown of the old generation before constructing the new one.
-Stop and manager shutdown are idempotent.
+Invalid transitions raise a categorized internal orchestration error. Worker
+transition history is a 64-entry deque while `transition_count` remains a
+cumulative counter.
 
-A worker owns exactly one capture, frame buffer, analytics pipeline, event
-queue, capture task, analytics task, event-dispatch task, and supervisor task.
-Capture and analytics are independent so inference cannot stall frame capture.
-The CV engine performs inference in its single-worker per-camera executor.
+The manager uses a short-lived registry lock and weakly retained per-camera
+lifecycle locks. Operations for the same camera serialize; operations for
+different cameras proceed independently. Lock order is: obtain or retain the
+camera lock reference under the registry lock, release the registry lock,
+acquire the camera lock, then briefly reacquire the registry lock for atomic
+ownership changes. No registry lock is held during capture construction,
+pipeline construction, worker start/stop, callback settlement, or resource
+closure.
 
-Shutdown follows this order:
+Workers remain registered while `STOPPING` and are removed only after cleanup.
+Start arriving during stop waits for the old generation, then creates exactly
+one replacement. Start, stop, and restart return `LifecycleOperationResult`
+with stable outcomes: `started`, `already_running`, `stopped`,
+`already_stopped`, `restarted`, or `failed`.
 
-1. stop accepting events and signal the worker loops;
-2. close capture to interrupt reconnect waits;
+`max_active_workers` bounds active ownership and defaults to eight, matching the
+platform camera limit. Concurrent final-slot starts are decided atomically.
+
+## Cancellation-safe shutdown
+
+The first manager shutdown caller closes start admission and creates one named
+internal shutdown task. Every caller awaits that same task through
+`asyncio.shield()`, so cancelling a waiter cannot cancel cleanup. Shutdown
+acquires each camera's lifecycle lock, stops it, awaits all owned tasks, records
+status, and removes ownership only after settlement.
+
+Cleanup order per worker is:
+
+1. close event admission and signal capture/analytics loops;
+2. close capture exactly once;
 3. await capture and analytics tasks;
-4. always await `FramePipeline.aclose()` and its accepted callbacks;
-5. drain events accepted before shutdown and stop the dispatcher;
-6. clear the frame buffer and publish the final state.
+4. call pipeline `aclose()` exactly once;
+5. drain accepted FIFO events and stop the dispatcher;
+6. clear the frame buffer and publish `STOPPED` or `FAILED`.
 
-Events offered after step 1 are counted as dropped and never reach the sink.
-No worker-owned async task remains after stop returns. A native OpenCV capture
-constructor cannot be forcibly interrupted by Python; the CV engine discards a
-candidate that returns after closure, as documented in its README.
+Cleanup failures are sanitized, categorized, retained in status, aggregated by
+the manager, and surfaced as `ShutdownError` after all workers settle. Repeated
+shutdown returns the same success or failure. A native OpenCV constructor
+cannot be forcibly interrupted; it runs outside the event loop, its worker
+remains owned, and shutdown waits until it returns so the late candidate can be
+closed rather than leaked.
 
-All resource growth is bounded: frame buffers and event queues are configured
-per camera; callback backlog is bounded by the same event capacity; worker
-transition history defaults to 64 entries; manager status/generation retention
-defaults to 256 camera IDs. Reconnect failures have an interruptible delay.
+## Capture and reconnect
 
-## Agent-2 adapters
+`CameraDefinition` requires finite float settings. Reconnect delay is bounded
+from 0.05 through 300 seconds. Zero, negative, NaN, and infinite values are
+rejected, preventing retry busy-spins. Reconnect waits are interruptible by the
+worker stop event. Capture and analytics remain independent, and frame storage
+is a bounded latest-frame ring.
 
-Agent-2's desktop backend supplies adapters for these narrow protocols in
-`app.orchestration.protocols`:
+## Public errors
 
-- `CameraCatalog.list_enabled_cameras()` returns complete `CameraDefinition`
-  values with already-decrypted sources and validated `CVConfig` objects.
-- `EventSink.emit()` durably writes one `RoutedAnalyticsEvent` to Agent-2's
-  local event/offline-sync transaction. The sink must be idempotent using the
-  camera ID, worker generation, and event identity assigned by its adapter.
-- `Scheduler` is the small APScheduler-compatible `add_job`/`remove_job`
-  surface used for a coalesced, single-instance reconciliation job.
+External lifecycle calls raise `OrchestrationError` with a stable
+`FailureCategory`: `configuration`, `capacity`, `capture`, `model`, `pipeline`,
+`callback`, `sink`, `scheduler`, `shutdown`, or `internal`. Public exception
+text, `repr`, logs, status, and operation DTOs contain only sanitized summaries.
+Connection URLs are replaced wholesale and sensitive assignments are removed.
+Original exceptions are retained only as private diagnostic causes.
 
-Agent-2 owns source decryption, SQLCipher sessions, persistence, auth, API
-envelopes, APScheduler startup/shutdown, and construction during FastAPI
-lifespan. Optional backend failures are surfaced through event failure metrics;
-they do not block capture or cause an unbounded retry queue in orchestration.
+## Agent-2 event and scheduler boundary
 
-Recommended lifespan wiring:
+Agent-2 supplies three narrow adapters from `app.orchestration.protocols`:
 
-```python
-manager = CameraWorkerManager(local_event_sink)
-service = CameraOrchestrationService(manager, camera_catalog, scheduler=scheduler)
-await service.start()
-# FastAPI serves requests
-await service.stop()
-```
+- `CameraCatalog.list_enabled_cameras()` returns validated camera definitions
+  with decrypted sources. A source is passed only to that camera's capture
+  factory and is never included in public status or events.
+- `EventSink.emit()` persists an orchestration-owned `RoutedAnalyticsEvent`.
+  It contains primitives, UTC timestamps, and recursively frozen payload data;
+  it exposes no CV-engine event object. `to_dict()` returns a fresh,
+  deterministic JSON-compatible copy. Unsupported, non-finite, URL-bearing, or
+  sensitive payload data is rejected as a callback failure.
+- `Scheduler` provides only `add_job` and sync-or-async `remove_job`.
 
-## Agent-4-facing adapter surface
+Each camera has one bounded FIFO event queue. Accepted events preserve callback
+order for that camera. There is deliberately no cross-camera ordering because
+workers execute independently. Queue overflow drops the new event and increments
+`dropped_event_count`; a slow sink is bounded by `event_sink_timeout_seconds`.
+Sink failure is observable and later events continue.
 
-Agent-4 calls Agent-2's localhost API rather than importing orchestration. The
-API adapter can map these operations without exposing camera credentials:
+`CameraOrchestrationService` owns shared start/stop tasks and registers every
+active reconciliation task. Stop closes reconciliation admission, removes and
+awaits scheduler shutdown, awaits in-progress reconciliation, and only then
+shuts down the manager. Scheduler registration failure rolls back workers.
+Overlapping ticks coalesce. Desired catalog state wins on the next scheduled
+tick after a manual camera stop; service stop always has final precedence.
 
-| UI need | Orchestration call |
+Agent-2 retains ownership of source decryption, SQLCipher, authentication,
+persistence transactions, FastAPI lifespan, and HTTP/WebSocket adapters.
+
+## Agent-4 status boundary
+
+`CameraStatus`, `LifecycleOperationResult`, and `OrchestrationHealth` are frozen
+snapshots with explicit `to_dict()` methods. `CameraStatus.from_dict()` supports
+round-trip validation. Public data includes:
+
+- camera ID, generation, lifecycle state, health, and running flag;
+- UTC update, last-frame, last-processing, and last-event timestamps;
+- failure category and redacted summary;
+- reconnect count and processing FPS;
+- current/capacity values for frame and event queues;
+- callback backlog, dropped events, and processing/event counters;
+- cumulative transition count.
+
+No task, capture, pipeline, connection source, mutable payload, or mapping proxy
+crosses this boundary. Agent-2 can map manager methods to local start, stop,
+restart, status, health, and stream endpoints without inventing missing state.
+
+## Resource bounds
+
+| Resource | Bound |
 |---|---|
-| Start camera | `manager.start_camera(definition)` |
-| Stop camera | `manager.stop_camera(camera_id)` |
-| Restart after config change | `manager.restart_camera(definition)` |
-| Camera list/status/metrics | `manager.statuses()` |
-| Overall health | `manager.health()` |
-| JPEG WebSocket source | `manager.get_frame_buffer(camera_id)` |
+| Active workers | `max_active_workers`, default 8 |
+| Frame ring | `frame_buffer_size`, default 10 |
+| Event queue | `event_queue_size`, default 100 |
+| CV callback tasks | same configured event capacity |
+| Transition history | 64 per worker |
+| Retained camera statuses/generations | `retained_statuses`, default 256 |
+| Per-camera locks | weakly retained while referenced |
+| Scheduler reconciliation | one active/coalesced invocation |
+| Shutdown task | one shared task per manager/service |
 
-Suggested local routes are `POST /cameras/{id}/start`, `/stop`, `/restart`,
-`GET /cameras/status`, `GET /health`, and `WS /ws/stream/{id}`. Their auth,
-response models, JPEG encoding, and WebSocket lifecycle belong to Agents 2/4.
+Stopped workers and completed reconciliation tasks are removed. Completed
+shutdown tasks remain as the authoritative idempotent result.
 
-Status exposes only camera IDs, state, generation, timestamps, counters, and a
-sanitized error. `CameraDefinition.source` is excluded from repr. URL userinfo
-and sensitive query parameters are redacted before errors reach status/logs.
-
-## Validation
+## Validation and benchmark
 
 From the repository root in PowerShell:
 
@@ -104,5 +152,10 @@ python -m venv .venv
 .\.venv\Scripts\python -m pip install --upgrade pip
 .\.venv\Scripts\python -m pip install -r .\apps\desktop-backend\requirements-orchestration-dev.txt
 .\.venv\Scripts\python -m pytest .\apps\desktop-backend\tests -q
-.\.venv\Scripts\python -m compileall .\apps\desktop-backend\app
+.\.venv\Scripts\python -m compileall .\apps\desktop-backend\app\orchestration
+.\.venv\Scripts\python .\apps\desktop-backend\benchmarks\benchmark_orchestration.py
 ```
+
+The benchmark uses eight fake cameras, fake pipelines, and bounded event queues.
+It reports lifecycle/event cleanup only. It uses no model or camera and must not
+be interpreted as inference throughput.
