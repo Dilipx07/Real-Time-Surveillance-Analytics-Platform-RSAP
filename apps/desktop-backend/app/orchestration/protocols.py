@@ -1,14 +1,12 @@
-"""Narrow integration contracts owned by adjacent desktop-backend modules."""
+"""Narrow integration contracts; Agent-2 never imports CV-engine event types."""
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any, Protocol
 
 import numpy as np
-
-from cv_engine import AnalyticsEvent, AnalyticsResult
 
 from .models import CameraDefinition, RoutedAnalyticsEvent
 
@@ -29,7 +27,15 @@ class Scheduler(Protocol):
         **kwargs: Any,
     ) -> Any: ...
 
-    def remove_job(self, job_id: str) -> None: ...
+    def remove_job(self, job_id: str) -> None | Awaitable[None]: ...
+
+
+class CallbackAnalyticsEvent(Protocol):
+    event_type: str
+    timestamp: datetime
+    track_id: int | None
+    zone_id: str | None
+    payload: Mapping[str, Any]
 
 
 class Capture(Protocol):
@@ -39,14 +45,12 @@ class Capture(Protocol):
 
 
 class Pipeline(Protocol):
-    async def process_if_due(
-        self, frame: np.ndarray, timestamp: datetime
-    ) -> AnalyticsResult | None: ...
+    async def process_if_due(self, frame: np.ndarray, timestamp: datetime) -> Any: ...
 
     async def aclose(self, *, cancel_pending: bool = False) -> None: ...
 
 
 CaptureFactory = Callable[[CameraDefinition], Capture]
 PipelineFactory = Callable[
-    [CameraDefinition, Callable[[AnalyticsEvent], Awaitable[None]]], Pipeline
+    [CameraDefinition, Callable[[CallbackAnalyticsEvent], Awaitable[None]]], Pipeline
 ]
