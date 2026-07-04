@@ -194,7 +194,26 @@ class CameraWorkerManager:
             if camera_id not in desired_by_id
         ]
         if removals:
-            removal_results = await asyncio.gather(*removals)
+            raw_removal_results = await asyncio.gather(
+                *removals, return_exceptions=True
+            )
+            removal_errors = tuple(
+                result
+                for result in raw_removal_results
+                if isinstance(result, BaseException)
+            )
+            if removal_errors:
+                error = removal_errors[0]
+                if isinstance(error, OrchestrationError):
+                    raise error
+                raise OrchestrationError(
+                    FailureCategory.SHUTDOWN, None, error, cause=error
+                ) from None
+            removal_results = tuple(
+                result
+                for result in raw_removal_results
+                if isinstance(result, LifecycleOperationResult)
+            )
             failures = tuple(
                 result.error
                 for result in removal_results
@@ -212,7 +231,21 @@ class CameraWorkerManager:
             elif worker.definition != definition or worker.state not in RUNNING_STATES:
                 operations.append(self.restart_camera(definition))
         if operations:
-            await asyncio.gather(*operations)
+            operation_results = await asyncio.gather(
+                *operations, return_exceptions=True
+            )
+            errors = tuple(
+                result
+                for result in operation_results
+                if isinstance(result, BaseException)
+            )
+            if errors:
+                error = errors[0]
+                if isinstance(error, OrchestrationError):
+                    raise error
+                raise OrchestrationError(
+                    FailureCategory.INTERNAL, None, error, cause=error
+                ) from None
         return self.statuses()
 
     def get_frame_buffer(self, camera_id: str) -> FrameBuffer:

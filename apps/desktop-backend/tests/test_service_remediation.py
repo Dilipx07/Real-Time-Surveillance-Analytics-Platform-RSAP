@@ -121,6 +121,36 @@ async def test_scheduler_start_registration_failure_rolls_back_workers() -> None
 
 
 @pytest.mark.asyncio
+async def test_reconcile_capacity_failure_settles_operations_before_rollback() -> None:
+    captures = CaptureFactory()
+    pipelines = PipelineFactory()
+    manager = CameraWorkerManager(
+        RecordingSink(),
+        capture_factory=captures,
+        pipeline_factory=pipelines,
+        max_active_workers=1,
+    )
+    service = CameraOrchestrationService(
+        manager,
+        ControlledCatalog([CameraDefinition("a", 0), CameraDefinition("b", 1)]),
+    )
+
+    with pytest.raises(OrchestrationError):
+        await service.start()
+
+    pending = [
+        task
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task() and task.get_name().startswith("camera-")
+    ]
+    assert manager.active_camera_ids() == ()
+    assert pending == []
+    assert all(item.close_calls == 1 for item in captures.instances)
+    assert all(item.aclose_calls == 1 for item in pipelines.instances)
+    await service.stop()
+
+
+@pytest.mark.asyncio
 async def test_scheduler_shutdown_failure_is_reported_after_worker_cleanup() -> None:
     manager = CameraWorkerManager(
         RecordingSink(),
