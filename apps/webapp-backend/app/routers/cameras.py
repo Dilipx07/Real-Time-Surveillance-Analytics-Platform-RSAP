@@ -20,29 +20,57 @@ def public_camera(row: asyncpg.Record) -> dict:
     return result
 
 
+def camera_create_matches(row: asyncpg.Record, payload: CameraCreate) -> bool:
+    """Return whether an existing row is the exact idempotent create result."""
+    return (
+        row["name"] == payload.name
+        and decrypt_text(row["stream_url_encrypted"]) == payload.stream_url
+        and row["stream_type"] == payload.stream_type
+        and row["location_label"] == payload.location_label
+        and row["analytics_config"] == payload.analytics_config
+        and row["zones"] == payload.zones
+    )
+
+
 @router.post("/", status_code=201, response_model=SuccessEnvelope)
 async def create_camera(payload: CameraCreate, request: Request, user: CurrentUserDep, db: asyncpg.Connection = Depends(get_db)):
     authorize(user, "cameras", "create", owner_id=user.id)
     async with db.transaction():
         await db.fetchrow("SELECT id FROM auth.users WHERE id=$1 FOR UPDATE", user.id)
-        license_row = await db.fetchrow(
-            """SELECT max_cameras FROM rbac.licenses WHERE user_id=$1 AND is_active=true
-               AND valid_from <= NOW() AND valid_until > NOW()
-               ORDER BY valid_until DESC LIMIT 1 FOR UPDATE""",
-            user.id,
-        )
-        if license_row is None:
-            raise HTTPException(status_code=403, detail="No active license")
-        count = await db.fetchval("SELECT count(*) FROM va.cameras WHERE user_id=$1", user.id)
-        if count >= license_row["max_cameras"]:
-            raise HTTPException(status_code=409, detail="License camera limit reached")
-        row = await db.fetchrow(
-            f"""INSERT INTO va.cameras(user_id, name, stream_url_encrypted, stream_type, location_label, analytics_config, zones)
-                VALUES($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb) RETURNING {CAMERA_COLUMNS}""",
-            user.id, payload.name, encrypt_text(payload.stream_url), payload.stream_type,
-            payload.location_label, payload.analytics_config, payload.zones,
-        )
-        await write_audit_log(db, request, user, "create", "va.camera", row["id"])
+        row = await db.fetchrow(f"SELECT {CAMERA_COLUMNS} FROM va.cameras WHERE id=$1", payload.id)
+        if row is not None and (
+            row["user_id"] != user.id or not camera_create_matches(row, payload)
+        ):
+            raise HTTPException(status_code=409, detail="Camera ID is already in use")
+        if row is None:
+            license_row = await db.fetchrow(
+                """SELECT max_cameras FROM rbac.licenses WHERE user_id=$1 AND is_active=true
+                   AND valid_from <= NOW() AND valid_until > NOW()
+                   ORDER BY valid_until DESC LIMIT 1 FOR UPDATE""",
+                user.id,
+            )
+            if license_row is None:
+                raise HTTPException(status_code=403, detail="No active license")
+            count = await db.fetchval("SELECT count(*) FROM va.cameras WHERE user_id=$1", user.id)
+            if count >= license_row["max_cameras"]:
+                raise HTTPException(status_code=409, detail="License camera limit reached")
+            row = await db.fetchrow(
+                f"""INSERT INTO va.cameras(id, user_id, name, stream_url_encrypted, stream_type, location_label, analytics_config, zones)
+                    VALUES($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)
+                    ON CONFLICT (id) DO NOTHING RETURNING {CAMERA_COLUMNS}""",
+                payload.id, user.id, payload.name, encrypt_text(payload.stream_url),
+                payload.stream_type, payload.location_label, payload.analytics_config, payload.zones,
+            )
+            if row is None:
+                row = await db.fetchrow(f"SELECT {CAMERA_COLUMNS} FROM va.cameras WHERE id=$1", payload.id)
+                if (
+                    row is None
+                    or row["user_id"] != user.id
+                    or not camera_create_matches(row, payload)
+                ):
+                    raise HTTPException(status_code=409, detail="Camera ID is already in use")
+            else:
+                await write_audit_log(db, request, user, "create", "va.camera", row["id"])
     return envelope(public_camera(row))
 
 
@@ -81,7 +109,8 @@ async def update_camera(payload: CameraUpdate, camera_id: UUID, request: Request
         values["stream_url_encrypted"] = encrypt_text(values.pop("stream_url"))
     assignments, args = [], []
     for key, value in values.items():
-        args.append(value); assignments.append(f"{key}=${len(args)}")
+        args.append(value)
+        assignments.append(f"{key}=${len(args)}")
     args.extend([camera_id, user.id])
     async with db.transaction():
         row = await db.fetchrow(

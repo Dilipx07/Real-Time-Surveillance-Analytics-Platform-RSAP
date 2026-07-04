@@ -1,0 +1,1 @@
+"""Versioned desktop database migrations."""
