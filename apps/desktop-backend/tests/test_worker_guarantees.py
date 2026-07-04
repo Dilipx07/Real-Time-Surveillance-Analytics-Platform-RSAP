@@ -14,27 +14,27 @@ from fakes import CaptureFactory, PipelineFactory, RecordingSink, eventually
 
 
 @pytest.mark.asyncio
-async def test_reconnect_failures_are_backed_off_and_observable() -> None:
+async def test_reconnect_delay_failures_are_backed_off_and_observable() -> None:
     captures = CaptureFactory(outcomes=[False] * 100, read_delay=0)
     manager = CameraWorkerManager(
         RecordingSink(), capture_factory=captures, pipeline_factory=PipelineFactory()
     )
     definition = CameraDefinition(
-        "offline", "rtsp://camera/live", reconnect_delay_seconds=0.03
+        "offline", "rtsp://camera/live", reconnect_delay_seconds=0.05
     )
     await manager.start_camera(definition)
 
-    await asyncio.sleep(0.12)
+    await asyncio.sleep(0.16)
     status = manager.get_status("offline")
 
     assert status is not None and status.state is WorkerState.RECONNECTING
-    assert 2 <= captures.instances[0].read_calls <= 6
+    assert 2 <= captures.instances[0].read_calls <= 5
     assert status.metrics.capture_failures == captures.instances[0].read_calls
     await manager.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_event_queue_is_bounded_and_reports_drops() -> None:
+async def test_slow_sink_backpressure_queue_is_bounded_and_reports_drops() -> None:
     gate = asyncio.Event()
     sink = RecordingSink(gate=gate)
     manager = CameraWorkerManager(
@@ -48,7 +48,7 @@ async def test_event_queue_is_bounded_and_reports_drops() -> None:
     await manager.start_camera(definition)
 
     await eventually(
-        lambda: (manager.get_status("busy").metrics.events_dropped > 0),  # type: ignore[union-attr]
+        lambda: manager.get_status("busy").metrics.events_dropped > 0,  # type: ignore[union-attr]
         timeout=2,
     )
     assert len(manager.get_frame_buffer("busy")) <= 2
@@ -60,7 +60,7 @@ async def test_event_queue_is_bounded_and_reports_drops() -> None:
 
 
 @pytest.mark.asyncio
-async def test_event_sink_failure_is_recorded_without_stopping_capture() -> None:
+async def test_sink_exception_is_recorded_without_stopping_capture() -> None:
     manager = CameraWorkerManager(
         RecordingSink(fail=True),
         capture_factory=CaptureFactory(),
@@ -96,7 +96,8 @@ async def test_failure_logs_and_status_redact_credentials(
         await manager.shutdown()
 
     assert "secret-value" not in caplog.text
-    assert "token=<redacted>" in caplog.text
+    assert "<redacted>" in caplog.text
+    assert "token=" not in caplog.text
 
 
 @pytest.mark.asyncio

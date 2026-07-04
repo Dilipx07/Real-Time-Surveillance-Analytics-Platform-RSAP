@@ -9,6 +9,7 @@ from app.orchestration import (
     CameraDefinition,
     CameraOrchestrationService,
     CameraWorkerManager,
+    OrchestrationError,
 )
 
 from fakes import CaptureFactory, PipelineFactory, RecordingSink
@@ -71,8 +72,9 @@ async def test_overlapping_reconcile_is_coalesced() -> None:
         pipeline_factory=PipelineFactory(),
     )
     catalog = Catalog([])
-    catalog.gate = asyncio.Event()
     service = CameraOrchestrationService(manager, catalog)
+    await service.start()
+    catalog.gate = asyncio.Event()
 
     first = asyncio.create_task(service.reconcile())
     await asyncio.sleep(0)
@@ -80,7 +82,7 @@ async def test_overlapping_reconcile_is_coalesced() -> None:
     catalog.gate.set()
     await first
 
-    assert catalog.calls == 1
+    assert catalog.calls == 2
     await service.stop()
 
 
@@ -94,8 +96,8 @@ async def test_duplicate_catalog_ids_fail_without_starting_workers() -> None:
     catalog = Catalog([CameraDefinition("same", 0), CameraDefinition("same", 1)])
     service = CameraOrchestrationService(manager, catalog)
 
-    with pytest.raises(ValueError, match="duplicate"):
-        await service.reconcile()
+    with pytest.raises(OrchestrationError, match="duplicate"):
+        await service.start()
 
     assert manager.active_camera_ids() == ()
     await service.stop()
