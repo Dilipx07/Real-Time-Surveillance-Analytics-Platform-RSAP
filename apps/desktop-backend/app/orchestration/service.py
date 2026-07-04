@@ -1,13 +1,17 @@
-"""Scheduler-facing desired-state reconciliation service."""
+"""Scheduler-facing desired-state reconciliation with owned lifecycle tasks."""
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
+from math import isfinite
 
+from .errors import FailureCategory, OrchestrationError, OrchestrationFailure
 from .manager import CameraWorkerManager
 from .models import OrchestrationHealth
 from .protocols import CameraCatalog, Scheduler
+from .security import sanitize_error
 
 LOGGER = logging.getLogger(__name__)
 
@@ -23,49 +27,201 @@ class CameraOrchestrationService:
         scheduler: Scheduler | None = None,
         reconcile_interval_seconds: float = 30.0,
     ) -> None:
-        if reconcile_interval_seconds <= 0:
-            raise ValueError("reconcile interval must be positive")
+        if (
+            not isfinite(reconcile_interval_seconds)
+            or reconcile_interval_seconds < 0.05
+            or reconcile_interval_seconds > 86_400
+        ):
+            raise ValueError(
+                "reconcile interval must be finite and between 0.05 and 86400 seconds"
+            )
         self._manager = manager
         self._catalog = catalog
         self._scheduler = scheduler
         self._interval = reconcile_interval_seconds
+        self._state_lock = asyncio.Lock()
         self._reconcile_lock = asyncio.Lock()
+        self._reconcile_tasks: set[asyncio.Task[object]] = set()
+        self._accepting_reconcile = False
+        self._scheduler_registered = False
         self._started = False
+        self._start_task: asyncio.Task[None] | None = None
+        self._stop_task: asyncio.Task[None] | None = None
+        self._last_failure: OrchestrationFailure | None = None
 
     async def start(self) -> None:
-        if self._started:
-            return
-        await self.reconcile()
-        if self._scheduler is not None:
-            self._scheduler.add_job(
-                self.reconcile,
-                "interval",
-                id=self.JOB_ID,
-                seconds=self._interval,
-                coalesce=True,
-                max_instances=1,
-                replace_existing=True,
+        async with self._state_lock:
+            if self._stop_task is not None:
+                raise OrchestrationError(
+                    FailureCategory.SHUTDOWN, None, "orchestration service is stopping"
+                )
+            if self._started:
+                return
+            if self._start_task is None:
+                self._start_task = asyncio.create_task(
+                    self._start_impl(), name="camera-service-start"
+                )
+            start_task = self._start_task
+        await asyncio.shield(start_task)
+
+    async def _start_impl(self) -> None:
+        async with self._state_lock:
+            self._accepting_reconcile = True
+        try:
+            await self.reconcile()
+            async with self._state_lock:
+                if not self._accepting_reconcile:
+                    return
+            if self._scheduler is not None:
+                try:
+                    self._scheduler.add_job(
+                        self.reconcile,
+                        "interval",
+                        id=self.JOB_ID,
+                        seconds=self._interval,
+                        coalesce=True,
+                        max_instances=1,
+                        replace_existing=True,
+                    )
+                except Exception as error:
+                    raise OrchestrationError(
+                        FailureCategory.SCHEDULER,
+                        None,
+                        error,
+                        cause=error,
+                    ) from None
+                self._scheduler_registered = True
+            async with self._state_lock:
+                self._started = True
+        except BaseException as error:
+            async with self._state_lock:
+                self._accepting_reconcile = False
+            try:
+                await self._manager.shutdown()
+            except Exception as cleanup_error:
+                LOGGER.error(
+                    "service startup rollback failed: %s", sanitize_error(cleanup_error)
+                )
+            if isinstance(error, OrchestrationError):
+                self._last_failure = error.failure
+                raise
+            if isinstance(error, asyncio.CancelledError):
+                raise
+            public = OrchestrationError(
+                FailureCategory.INTERNAL, None, error, cause=error
             )
-        self._started = True
+            self._last_failure = public.failure
+            raise public from None
 
     async def reconcile(self) -> None:
-        if self._reconcile_lock.locked():
-            LOGGER.info(
-                "camera reconciliation already running; overlapping invocation skipped"
+        current = asyncio.current_task()
+        if current is None:
+            raise RuntimeError("reconciliation requires an asyncio task")
+        async with self._state_lock:
+            if not self._accepting_reconcile:
+                return
+            self._reconcile_tasks.add(current)
+        try:
+            if self._reconcile_lock.locked():
+                LOGGER.info(
+                    "camera reconciliation already running; overlapping invocation skipped"
+                )
+                return
+            async with self._reconcile_lock:
+                async with self._state_lock:
+                    if not self._accepting_reconcile:
+                        return
+                desired = list(await self._catalog.list_enabled_cameras())
+                async with self._state_lock:
+                    if not self._accepting_reconcile:
+                        return
+                await self._manager.reconcile(desired)
+        except asyncio.CancelledError:
+            raise
+        except OrchestrationError as error:
+            self._last_failure = error.failure
+            LOGGER.error(
+                "camera reconciliation failed [%s]: %s",
+                error.category.value,
+                error.public_message,
             )
-            return
-        async with self._reconcile_lock:
-            desired = list(await self._catalog.list_enabled_cameras())
-            await self._manager.reconcile(desired)
+            raise
+        except Exception as error:
+            public = OrchestrationError(
+                FailureCategory.SCHEDULER, None, error, cause=error
+            )
+            self._last_failure = public.failure
+            LOGGER.error("camera reconciliation failed: %s", public.public_message)
+            raise public from None
+        finally:
+            async with self._state_lock:
+                self._reconcile_tasks.discard(current)
 
     async def stop(self) -> None:
-        if self._scheduler is not None and self._started:
+        async with self._state_lock:
+            if self._stop_task is None:
+                self._stop_task = asyncio.create_task(
+                    self._stop_impl(), name="camera-service-stop"
+                )
+            stop_task = self._stop_task
+        await asyncio.shield(stop_task)
+
+    async def _stop_impl(self) -> None:
+        failures: list[OrchestrationFailure] = []
+        async with self._state_lock:
+            self._accepting_reconcile = False
+            reconcile_tasks = tuple(
+                task
+                for task in self._reconcile_tasks
+                if task is not asyncio.current_task()
+            )
+
+        if self._scheduler is not None and self._scheduler_registered:
             try:
-                self._scheduler.remove_job(self.JOB_ID)
-            except Exception:
-                LOGGER.exception("failed to remove camera reconciliation job")
-        self._started = False
-        await self._manager.shutdown()
+                result = self._scheduler.remove_job(self.JOB_ID)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as error:
+                public = OrchestrationError(
+                    FailureCategory.SCHEDULER, None, error, cause=error
+                )
+                failures.append(public.failure)
+                LOGGER.error(
+                    "failed to remove camera reconciliation job: %s",
+                    public.public_message,
+                )
+            finally:
+                self._scheduler_registered = False
+
+        if reconcile_tasks:
+            results = await asyncio.gather(*reconcile_tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException) and not isinstance(
+                    result, asyncio.CancelledError
+                ):
+                    public = OrchestrationError(
+                        FailureCategory.SCHEDULER, None, result, cause=result
+                    )
+                    failures.append(public.failure)
+
+        try:
+            await self._manager.shutdown()
+        except Exception as error:
+            public = OrchestrationError(
+                FailureCategory.SHUTDOWN, None, error, cause=error
+            )
+            failures.append(public.failure)
+
+        async with self._state_lock:
+            self._started = False
+        if failures:
+            public = OrchestrationError(
+                FailureCategory.SHUTDOWN,
+                None,
+                f"service shutdown completed with {len(failures)} failure(s)",
+            )
+            self._last_failure = public.failure
+            raise public
 
     def health(self) -> OrchestrationHealth:
         return self._manager.health()
