@@ -5,3 +5,6 @@ pydantic==2.8.2
 pydantic-settings==2.4.0
 cryptography==43.0.1
 sqlcipher3-wheels==0.5.7
+# App-scoped Docker builds cannot COPY the monorepo sibling package. Pin the
+# already-merged Agent-6 source so the runtime image contains cv_engine.
+rsap-cv-engine @ https://github.com/Dilipx07/Real-Time-Surveillance-Analytics-Platform-RSAP/archive/c169645a48a9397cd33811b1d38d05d2f8d912d2.zip#subdirectory=packages/cv-engine
