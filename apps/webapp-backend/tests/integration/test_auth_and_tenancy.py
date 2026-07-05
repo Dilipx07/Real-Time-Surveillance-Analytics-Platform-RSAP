@@ -419,3 +419,70 @@ def test_concurrent_super_admin_reductions_preserve_one_operator(
     assert statuses.count(200) <= 1
     assert 409 in statuses
     assert remaining >= 1
+
+
+def test_camera_create_idempotency_conflict_tenant_isolation_and_concurrency(seeded):
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    from main import app
+
+    camera_id = uuid4()
+    payload = {
+        "id": str(camera_id),
+        "name": "Idempotent gate",
+        "stream_url": "rtsp://camera.example/live",
+        "stream_type": "rtsp",
+        "analytics_config": {"people_counting": True},
+        "zones": [{"id": "entrance"}],
+    }
+    with TestClient(app) as client:
+        va = login(client, "va@example.com")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            responses = list(pool.map(
+                lambda _: client.post(
+                    "/api/v1/cameras/", headers=headers(va), json=payload
+                ),
+                range(2),
+            ))
+        assert [response.status_code for response in responses] == [201, 201]
+        assert {response.json()["data"]["id"] for response in responses} == {
+            str(camera_id)
+        }
+
+        repeated = client.post("/api/v1/cameras/", headers=headers(va), json=payload)
+        assert repeated.status_code == 201
+        assert repeated.json()["data"]["id"] == str(camera_id)
+
+        conflict = client.post(
+            "/api/v1/cameras/",
+            headers=headers(va),
+            json={**payload, "name": "Conflicting payload"},
+        )
+        assert conflict.status_code == 409
+
+        other = login(client, "other@example.com")
+        cross_tenant = client.post(
+            "/api/v1/cameras/", headers=headers(other), json=payload
+        )
+        unrelated = client.post(
+            "/api/v1/cameras/",
+            headers=headers(other),
+            json={**payload, "id": str(uuid4())},
+        )
+        assert cross_tenant.status_code == unrelated.status_code == 403
+        assert cross_tenant.json()["error"] == unrelated.json()["error"]
+
+    async def camera_count():
+        connection = await asyncpg.connect(
+            host="127.0.0.1", port=55432, database="rsap_test", user="rsap_test",
+            password="integration-postgres-password",
+        )
+        try:
+            return await connection.fetchval(
+                "SELECT count(*) FROM va.cameras WHERE id=$1", camera_id
+            )
+        finally:
+            await connection.close()
+
+    assert asyncio.run(camera_count()) == 1
