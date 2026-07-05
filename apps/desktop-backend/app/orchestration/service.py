@@ -225,3 +225,13 @@ class CameraOrchestrationService:
 
     def health(self) -> OrchestrationHealth:
         return self._manager.health()
+
+    def runtime_status(self) -> dict[str, object]:
+        """Return a non-blocking, secret-free scheduler/service snapshot."""
+        return {
+            "running": self._started and self._stop_task is None,
+            "accepting_reconcile": self._accepting_reconcile,
+            "scheduler_registered": self._scheduler_registered,
+            "reconcile_in_progress": bool(self._reconcile_tasks),
+            "last_failure": self._last_failure.to_dict() if self._last_failure else None,
+        }
