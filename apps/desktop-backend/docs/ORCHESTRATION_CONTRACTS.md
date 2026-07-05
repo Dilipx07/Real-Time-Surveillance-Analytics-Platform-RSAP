@@ -80,17 +80,33 @@ Original exceptions are retained only as private diagnostic causes.
 
 ## Agent-2 event and scheduler boundary
 
-Agent-2 supplies three narrow adapters from `app.orchestration.protocols`:
+Production adapters live in `app/orchestration/adapters.py`; orchestration core
+does not import Agent-2 repositories, services, SQLCipher, or FastAPI:
 
-- `CameraCatalog.list_enabled_cameras()` returns validated camera definitions
+- `Agent2CameraCatalog.list_enabled_cameras()` reads only active cameras through
+  `CameraRepository.list_active()`, requires the persisted active session to
+  hold `camera.read`, respects the licensed camera limit, and returns validated
+  camera definitions
   with decrypted sources. A source is passed only to that camera's capture
   factory and is never included in public status or events.
-- `EventSink.emit()` persists an orchestration-owned `RoutedAnalyticsEvent`.
+- `Agent2EventSink.emit()` resolves the active persisted session and persists an
+  orchestration-owned `RoutedAnalyticsEvent` through `AnalyticsService`, which
+  enforces `analytics.write`, analytics-module licensing, the local analytics
+  transaction, and durable sync enqueueing.
   It contains primitives, UTC timestamps, and recursively frozen payload data;
   it exposes no CV-engine event object. `to_dict()` returns a fresh,
   deterministic JSON-compatible copy. Unsupported, non-finite, URL-bearing, or
   sensitive payload data is rejected as a callback failure.
-- `Scheduler` provides only `add_job` and sync-or-async `remove_job`.
+- `AsyncioPeriodicScheduler` implements `Scheduler` without an external
+  dependency. Each job has one owned task, executes sequentially, observes and
+  sanitizes callback failures, and awaits cancellation during removal and
+  shutdown.
+
+Camera analytics configuration maps the supported scalar `CVConfig` fields,
+optional counting-line data, and complete polygon zones. Product feature flags
+that are not `CVConfig` fields remain Agent-2 licence metadata and are not
+passed to CV-engine. A malformed runtime zone/configuration is rejected as a
+categorized `configuration` failure; it is never silently coerced.
 
 Each camera has one bounded FIFO event queue. Accepted events preserve callback
 order for that camera. There is deliberately no cross-camera ordering because
@@ -105,8 +121,51 @@ shuts down the manager. Scheduler registration failure rolls back workers.
 Overlapping ticks coalesce. Desired catalog state wins on the next scheduled
 tick after a manual camera stop; service stop always has final precedence.
 
-Agent-2 retains ownership of source decryption, SQLCipher, authentication,
-persistence transactions, FastAPI lifespan, and HTTP/WebSocket adapters.
+Agent-2 retains ownership of source decryption, SQLCipher, authentication, and
+persistence transactions. The shared desktop composition root owns process
+lifespan wiring and the authenticated HTTP adapter described below.
+
+## Production container and lifespan
+
+`app/container.py` constructs exactly one `Agent2CameraCatalog`,
+`Agent2EventSink`, `AsyncioPeriodicScheduler`, `CameraWorkerManager`, and
+`CameraOrchestrationService` per application container. Database migration and
+verification complete before orchestration starts. If initial reconciliation
+or scheduler registration fails, service startup rolls back all workers and
+container startup fails without publishing the FastAPI application state.
+
+Container close is a shared shielded task. It stops reconciliation and workers,
+shuts down the scheduler, closes the central client, then closes the database;
+later cleanup continues even if a close caller is cancelled. FastAPI's lifespan
+calls this start/close pair, and both `/health` and the authenticated
+orchestration health route expose non-blocking, secret-free health snapshots.
+
+The app-scoped Docker context cannot copy the monorepo sibling CV package.
+`requirements.txt` therefore pins `rsap-cv-engine` to the immutable merged
+Agent-6 source commit; local development and tests continue to replace it with
+the editable sibling package from `requirements-orchestration-dev.txt`.
+
+## Authenticated Agent-4 routes
+
+`app/routers/orchestration.py` exposes:
+
+```text
+GET  /orchestration/health
+GET  /orchestration/cameras
+GET  /orchestration/cameras/{camera_id}/status
+POST /orchestration/cameras/{camera_id}/start
+POST /orchestration/cameras/{camera_id}/stop
+POST /orchestration/cameras/{camera_id}/restart
+```
+
+Every route requires Agent-2's bearer plus session-token dependency. Read and
+status routes require existing deny-by-default `camera.read`; lifecycle changes
+require `camera.update`, then revalidate camera readability and active runtime
+configuration. These existing permissions preserve the central permission
+contract without inventing a second role vocabulary. Responses use the desktop
+envelope and existing frozen Agent-4 DTO serialization. Unknown cameras return
+404, inactive cameras cannot be started/restarted, and no connection source is
+included in route data or errors.
 
 ## Agent-4 status boundary
 
@@ -123,8 +182,11 @@ round-trip validation. Public data includes:
 - cumulative transition count.
 
 No task, capture, pipeline, connection source, mutable payload, or mapping proxy
-crosses this boundary. Agent-2 can map manager methods to local start, stop,
-restart, status, health, and stream endpoints without inventing missing state.
+crosses this boundary. The production router maps manager methods to local
+start, stop, restart, status, and health endpoints. Live frame streaming remains
+deferred to the desktop streaming component/Agent-7 because no authenticated
+stream transport contract exists in Agent-2; the frame buffer is not exposed by
+these JSON endpoints.
 
 ## Resource bounds
 
