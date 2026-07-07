@@ -88,6 +88,7 @@ services:
       AES_ENCRYPTION_KEY: ${AES_ENCRYPTION_KEY:?AES_ENCRYPTION_KEY is required}
       LICENSE_SIGNING_SECRET: ${LICENSE_SIGNING_SECRET:?LICENSE_SIGNING_SECRET is required}
       APP_ENV: ${APP_ENV:-production}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,tauri://localhost}
     ports:
       - "8000:8000"
     networks:
@@ -137,6 +138,8 @@ services:
       MINIO_REGION: ${MINIO_REGION:-us-east-1}
 
       FILE_SERVER_SERVICE_TOKEN: ${FILE_SERVER_SERVICE_TOKEN:?FILE_SERVER_SERVICE_TOKEN is required}
+    ports:
+      - "8002:8002"
     networks:
       - rsap-net
     depends_on:
