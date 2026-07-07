@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import threading
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID
@@ -17,7 +19,7 @@ from app.orchestration.adapters import (
 )
 from app.schemas import CameraCreate, CameraUpdate, LocalSession
 from main import create_app
-from tests.fakes import CaptureFactory, PipelineFactory
+from tests.fakes import CaptureFactory, FakeCapture, PipelineFactory
 
 
 def _session(
@@ -48,6 +50,49 @@ def _session(
 
 def _headers() -> dict[str, str]:
     return {"Authorization": "Bearer jwt", "X-Session-Token": "session"}
+
+
+class _BlockingCaptureFactory:
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.instances: list[FakeCapture] = []
+
+    def __call__(self, definition: object) -> FakeCapture:
+        self.entered.set()
+        if not self.release.wait(timeout=5):
+            raise TimeoutError("blocked capture factory was not released")
+        capture = FakeCapture()
+        self.instances.append(capture)
+        return capture
+
+    async def wait_until_entered(self) -> None:
+        assert await asyncio.to_thread(self.entered.wait, 2)
+
+
+async def _seed_startup_camera(container: Container) -> None:
+    await container.database.migrate()
+    session, expiry = _session()
+    await container.sessions.save(session, expiry)
+    await container.cameras.create(
+        CameraCreate(name="Blocked", stream_url="0", stream_type="webcam"), 8
+    )
+
+
+def _pending_owned_tasks() -> list[str]:
+    prefixes = (
+        "camera-",
+        "scheduler-",
+        "desktop-startup-",
+        "desktop-lifespan-startup-",
+    )
+    return [
+        task.get_name()
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+        and not task.done()
+        and task.get_name().startswith(prefixes)
+    ]
 
 
 @pytest.mark.asyncio
@@ -277,6 +322,131 @@ async def test_production_orchestration_shutdown_no_worker_tasks(settings) -> No
         and not task.done()
         and task.get_name().startswith(("camera-", "scheduler-"))
     ]
+
+
+@pytest.mark.asyncio
+async def test_container_start_cancellation_closes_all_resources(settings) -> None:
+    captures = _BlockingCaptureFactory()
+    pipelines = PipelineFactory()
+    container = Container(
+        settings, capture_factory=captures, pipeline_factory=pipelines
+    )
+    await _seed_startup_camera(container)
+    startup = asyncio.create_task(container.start(), name="test-container-start")
+    await captures.wait_until_entered()
+
+    startup.cancel()
+    async with asyncio.timeout(1):
+        while container.orchestration._stop_task is None:
+            await asyncio.sleep(0)
+    startup.cancel()
+    captures.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(startup, timeout=2)
+
+    assert container._close_task is not None and container._close_task.done()
+    assert container.central._client.is_closed
+    assert container.orchestration._start_task is not None
+    assert container.orchestration._start_task.done()
+    assert container.camera_manager.active_camera_ids() == ()
+    assert container.orchestration_scheduler.job_count == 0
+    assert container.orchestration_scheduler._closed is True
+    assert captures.instances[0].close_calls == 1
+    assert pipelines.instances[0].aclose_calls == 1
+    assert _pending_owned_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_service_stop_during_start_observes_start_task(
+    settings,
+) -> None:
+    captures = _BlockingCaptureFactory()
+    pipelines = PipelineFactory()
+    container = Container(
+        settings, capture_factory=captures, pipeline_factory=pipelines
+    )
+    await _seed_startup_camera(container)
+    startup = asyncio.create_task(
+        container.orchestration.start(), name="test-service-start"
+    )
+    await captures.wait_until_entered()
+
+    stopping = asyncio.create_task(
+        container.orchestration.stop(), name="test-service-stop"
+    )
+    captures.release.set()
+    await asyncio.wait_for(asyncio.gather(startup, stopping), timeout=2)
+
+    assert container.orchestration._start_task is not None
+    assert container.orchestration._start_task.done()
+    assert container.orchestration.runtime_status()["running"] is False
+    assert container.camera_manager.active_camera_ids() == ()
+    assert container.orchestration_scheduler.job_count == 0
+    assert _pending_owned_tasks() == []
+    await container.close()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_start_cancellation_closes_all_resources(settings) -> None:
+    captures = _BlockingCaptureFactory()
+    pipelines = PipelineFactory()
+    container = Container(
+        settings, capture_factory=captures, pipeline_factory=pipelines
+    )
+    await _seed_startup_camera(container)
+    app = create_app(settings, container_factory=lambda _: container)
+    lifespan = app.router.lifespan_context(app)
+    startup = asyncio.create_task(lifespan.__aenter__(), name="test-lifespan-start")
+    await captures.wait_until_entered()
+
+    startup.cancel()
+    captures.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(startup, timeout=2)
+
+    assert container._close_task is not None and container._close_task.done()
+    assert container.central._client.is_closed
+    assert container.orchestration._start_task is not None
+    assert container.orchestration._start_task.done()
+    assert container.camera_manager.active_camera_ids() == ()
+    assert container.orchestration_scheduler._closed is True
+    assert _pending_owned_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_start_does_not_log_unretrieved_task_exception(
+    settings,
+) -> None:
+    loop = asyncio.get_running_loop()
+    contexts: list[dict[str, object]] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+    try:
+        captures = _BlockingCaptureFactory()
+        container = Container(
+            settings,
+            capture_factory=captures,
+            pipeline_factory=PipelineFactory(),
+        )
+        await _seed_startup_camera(container)
+        startup = asyncio.create_task(container.start(), name="test-observed-start")
+        await captures.wait_until_entered()
+        startup.cancel()
+        captures.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(startup, timeout=2)
+        assert container.orchestration._start_task is not None
+        assert container.orchestration._start_task.done()
+        del startup, container
+        gc.collect()
+        await asyncio.sleep(0)
+        assert not [
+            context
+            for context in contexts
+            if "Task exception was never retrieved" in str(context.get("message"))
+        ]
+    finally:
+        loop.set_exception_handler(previous_handler)
 
 
 def test_container_lifespan_and_authenticated_orchestration_routes(settings) -> None:
