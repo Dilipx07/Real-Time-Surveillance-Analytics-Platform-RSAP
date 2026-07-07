@@ -1,0 +1,36 @@
+{
+  "name": "rsap-webapp-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev -H 0.0.0.0 -p 3000",
+    "build": "next build",
+    "start": "next start -H 0.0.0.0 -p 3000",
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "lucide-react": "0.468.0",
+    "next": "^16.2.10",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "6.6.3",
+    "@testing-library/react": "16.1.0",
+    "@testing-library/user-event": "14.5.2",
+    "@types/node": "22.12.0",
+    "@types/react": "18.3.17",
+    "@types/react-dom": "18.3.5",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "^16.2.10",
+    "jsdom": "25.0.1",
+    "typescript": "5.7.2",
+    "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "postcss": "8.5.10"
+  }
+}
