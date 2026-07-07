@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from collections.abc import Callable
@@ -28,8 +29,14 @@ def create_app(
         container = container_factory(resolved)
         try:
             await container.start()
+        except asyncio.CancelledError as startup_error:
+            try:
+                await _settle_container_close(container)
+            except BaseException as cleanup_error:
+                raise startup_error from cleanup_error
+            raise
         except Exception:
-            await container.close()
+            await _settle_container_close(container)
             raise
         application.state.container = container
         try:
@@ -75,6 +82,21 @@ def create_app(
         })
 
     return application
+
+
+async def _settle_container_close(container: Container) -> None:
+    """Observe startup cleanup even when the lifespan waiter is cancelled."""
+    cleanup_task = asyncio.create_task(
+        container.close(), name="desktop-lifespan-startup-cleanup"
+    )
+    while True:
+        try:
+            await asyncio.shield(cleanup_task)
+            return
+        except asyncio.CancelledError:
+            if cleanup_task.done():
+                cleanup_task.result()
+                return
 
 
 app = create_app()

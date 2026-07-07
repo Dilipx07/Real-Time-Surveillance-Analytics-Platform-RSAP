@@ -62,7 +62,20 @@ class CameraOrchestrationService:
                     self._start_impl(), name="camera-service-start"
                 )
             start_task = self._start_task
-        await asyncio.shield(start_task)
+        try:
+            await asyncio.shield(start_task)
+        except asyncio.CancelledError:
+            cleanup_task = asyncio.create_task(
+                self.stop(), name="camera-service-start-cancel-cleanup"
+            )
+            try:
+                await _settle_task(cleanup_task)
+            except BaseException as cleanup_error:
+                LOGGER.error(
+                    "cancelled service startup cleanup failed: %s",
+                    sanitize_error(cleanup_error),
+                )
+            raise
 
     async def _start_impl(self) -> None:
         async with self._state_lock:
@@ -92,7 +105,8 @@ class CameraOrchestrationService:
                     ) from None
                 self._scheduler_registered = True
             async with self._state_lock:
-                self._started = True
+                if self._accepting_reconcile and self._stop_task is None:
+                    self._started = True
         except BaseException as error:
             async with self._state_lock:
                 self._accepting_reconcile = False
@@ -170,6 +184,20 @@ class CameraOrchestrationService:
         failures: list[OrchestrationFailure] = []
         async with self._state_lock:
             self._accepting_reconcile = False
+            start_task = (
+                self._start_task
+                if self._start_task is not asyncio.current_task()
+                and self._start_task is not None
+                else None
+            )
+
+        if start_task is not None:
+            # The start task owns rollback and records its categorized failure.
+            # Gathering it here observes every terminal result before scheduler
+            # or manager cleanup can race ahead of late startup work.
+            await asyncio.gather(start_task, return_exceptions=True)
+
+        async with self._state_lock:
             reconcile_tasks = tuple(
                 task
                 for task in self._reconcile_tasks
@@ -235,3 +263,15 @@ class CameraOrchestrationService:
             "reconcile_in_progress": bool(self._reconcile_tasks),
             "last_failure": self._last_failure.to_dict() if self._last_failure else None,
         }
+
+
+async def _settle_task(task: asyncio.Task[object]) -> None:
+    """Wait for owned cleanup despite repeated cancellation of this waiter."""
+    while True:
+        try:
+            await asyncio.shield(task)
+            return
+        except asyncio.CancelledError:
+            if task.done():
+                task.result()
+                return

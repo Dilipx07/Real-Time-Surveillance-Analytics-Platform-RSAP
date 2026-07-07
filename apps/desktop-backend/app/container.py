@@ -91,8 +91,20 @@ class Container:
         await self.database.verify()
         try:
             await self.orchestration.start()
-        except BaseException:
-            await self.orchestration_scheduler.shutdown()
+        except asyncio.CancelledError as startup_error:
+            cleanup_task = asyncio.create_task(
+                self.close(), name="desktop-startup-failure-cleanup"
+            )
+            try:
+                await _settle_task(cleanup_task)
+            except BaseException as cleanup_error:
+                raise startup_error from cleanup_error
+            raise
+        except Exception:
+            cleanup_task = asyncio.create_task(
+                self.close(), name="desktop-startup-failure-cleanup"
+            )
+            await _settle_task(cleanup_task)
             raise
         self._started = True
 
@@ -124,3 +136,15 @@ class Container:
         self._started = False
         if first_error is not None:
             raise first_error
+
+
+async def _settle_task(task: asyncio.Task[object]) -> None:
+    """Wait for full container cleanup despite repeated caller cancellation."""
+    while True:
+        try:
+            await asyncio.shield(task)
+            return
+        except asyncio.CancelledError:
+            if task.done():
+                task.result()
+                return
