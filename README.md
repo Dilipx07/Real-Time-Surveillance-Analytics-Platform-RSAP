@@ -34,7 +34,7 @@ docker compose -f .\infra\docker-compose.yml ps
 
 Redis is managed by Docker Compose, is password protected, persists through AOF, and is available only to containers on `rsap-net`. It deliberately has no host port mapping.
 
-For source-mounted application development after the application modules have been implemented:
+For source-mounted application development:
 
 ```powershell
 docker compose -f .\infra\docker-compose.yml -f .\infra\docker-compose.dev.yml up -d
@@ -88,3 +88,18 @@ docker compose -f .\infra\docker-compose.yml logs --tail 100 postgres redis mini
 ```
 
 Never commit `.env`, credentials, generated databases, model files, or local storage data.
+
+## End-user runtime workflow
+
+Agent-7 integration scripts provide a PowerShell-friendly path for local validation:
+
+```powershell
+Copy-Item .\.env.example .\.env -Force
+notepad .\.env
+.\scripts\dev-up.ps1 -Build
+.\scripts\seed-admin.ps1
+.\scripts\dev-health.ps1 -SkipDesktop
+.\scripts\e2e-smoke.ps1 -SkipDesktop
+```
+
+See `docs/RUNTIME_SMOKE_TEST.md` for the full central and desktop manual test guide.
