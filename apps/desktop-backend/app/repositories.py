@@ -298,6 +298,17 @@ class CameraRepository:
         rows, total = await self.database.read(operation)
         return {"items": [self._row(row) for row in rows], "limit": limit, "offset": offset, "total": total}
 
+    async def list_active(self, limit: int) -> list[dict[str, Any]]:
+        """Return only runnable cameras for the process-local orchestrator."""
+        if limit < 1:
+            return []
+        rows = await self.database.read(lambda connection: connection.execute(
+            "SELECT * FROM local_cameras WHERE is_active=1 "
+            "ORDER BY name COLLATE NOCASE, id LIMIT ?",
+            (limit,),
+        ).fetchall())
+        return [self._row(row) for row in rows]
+
     async def get(self, camera_id: UUID | str) -> dict[str, Any] | None:
         row = await self.database.read(lambda connection: connection.execute(
             "SELECT * FROM local_cameras WHERE id=?", (str(camera_id),)

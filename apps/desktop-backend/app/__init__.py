@@ -1,1 +1,1 @@
-"""RSAP desktop backend foundation."""
+"""RSAP desktop backend package."""
