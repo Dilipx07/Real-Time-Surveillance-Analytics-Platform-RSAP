@@ -34,10 +34,17 @@ docker compose -f .\infra\docker-compose.yml ps
 
 Redis is managed by Docker Compose, is password protected, persists through AOF, and is available only to containers on `rsap-net`. It deliberately has no host port mapping.
 
-For source-mounted application development after the application modules have been implemented:
+For source-mounted application development:
 
 ```powershell
 docker compose -f .\infra\docker-compose.yml -f .\infra\docker-compose.dev.yml up -d
+```
+
+`infra/docker-compose.dev.yml` is a development overlay, not a standalone compose project. Validate it together with the base file:
+
+```powershell
+docker compose -f .\infra\docker-compose.yml config --quiet
+docker compose -f .\infra\docker-compose.yml -f .\infra\docker-compose.dev.yml config --quiet
 ```
 
 Stop either stack with:
@@ -81,10 +88,28 @@ Protected central API requests carry both `Authorization: Bearer <JWT>` and `X-S
 ## Infrastructure validation
 
 ```powershell
-docker compose -f .\infra\docker-compose.yml config
+docker compose -f .\infra\docker-compose.yml config --quiet
+docker compose -f .\infra\docker-compose.yml -f .\infra\docker-compose.dev.yml config --quiet
 docker compose -f .\infra\docker-compose.yml build
 docker compose -f .\infra\docker-compose.yml up -d postgres redis minio
 docker compose -f .\infra\docker-compose.yml logs --tail 100 postgres redis minio
 ```
 
+The integration frontend uses the currently patched Next.js line to keep production audit clean. This is an Agent-7 integration decision and supersedes the older architecture text that mentioned Next.js 14 for the recovered central console shell.
+
 Never commit `.env`, credentials, generated databases, model files, or local storage data.
+
+## End-user runtime workflow
+
+Agent-7 integration scripts provide a PowerShell-friendly path for local validation:
+
+```powershell
+Copy-Item .\.env.example .\.env -Force
+notepad .\.env
+.\scripts\dev-up.ps1 -Build
+.\scripts\seed-admin.ps1
+.\scripts\dev-health.ps1 -SkipDesktop
+.\scripts\e2e-smoke.ps1 -SkipDesktop
+```
+
+See `docs/RUNTIME_SMOKE_TEST.md` for the full central and desktop manual test guide.
