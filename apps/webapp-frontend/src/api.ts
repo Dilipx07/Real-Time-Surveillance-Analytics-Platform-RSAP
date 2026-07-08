@@ -25,23 +25,30 @@ export type User = {
   email: string;
   role: string;
   is_active?: boolean;
+  phone?: string | null;
+  whatsapp_number?: string | null;
   created_at?: string;
-  permissions?: unknown[];
 };
 
 export type License = {
   id: string;
   user_id: string;
+  valid_from: string;
   valid_until: string;
   is_active: boolean;
   max_cameras: number;
+  features: Record<string, boolean>;
+  analytics_modules: string[];
 };
 
 export type Camera = {
   id: string;
   name: string;
+  stream_url: string;
   stream_type: string;
   location_label?: string | null;
+  analytics_config: Record<string, unknown>;
+  zones: Record<string, unknown>[];
   is_active: boolean;
 };
 
@@ -49,6 +56,7 @@ export type Person = {
   id: string;
   full_name: string;
   phone: string;
+  aadhaar_last4: string;
   entry_status: string;
   created_at: string;
 };
@@ -64,7 +72,24 @@ export type AnalyticsEvent = {
   id: string;
   camera_name: string;
   event_type: string;
+  payload: Record<string, unknown>;
   created_at: string;
+};
+
+export type Alert = {
+  id: string;
+  camera_name: string;
+  zone_id?: string | null;
+  confidence?: number | null;
+  resolved: boolean;
+  created_at: string;
+};
+
+export type Permission = {
+  id: string;
+  resource: string;
+  actions: string[];
+  constraints: Record<string, unknown>;
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
@@ -116,11 +141,39 @@ export async function apiGet<T>(path: string, session: AuthSession): Promise<T> 
   return parseEnvelope<T>(response);
 }
 
+async function apiRequest<T>(path: string, session: AuthSession, init: RequestInit): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, init);
+  return parseEnvelope<T>(response);
+}
+
 export async function apiPost<T>(path: string, session: AuthSession, body: unknown): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  return apiRequest<T>(path, session, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders(session) },
     body: JSON.stringify(body)
+  });
+}
+
+export async function apiPatch<T>(path: string, session: AuthSession, body: unknown): Promise<T> {
+  return apiRequest<T>(path, session, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...authHeaders(session) },
+    body: JSON.stringify(body)
+  });
+}
+
+export async function apiDelete<T>(path: string, session: AuthSession): Promise<T> {
+  return apiRequest<T>(path, session, {
+    method: "DELETE",
+    headers: authHeaders(session)
+  });
+}
+
+export async function apiPostForm<T>(path: string, session: AuthSession, body: FormData): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: authHeaders(session),
+    body
   });
   return parseEnvelope<T>(response);
 }
