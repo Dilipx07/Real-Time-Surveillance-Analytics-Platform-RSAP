@@ -11,9 +11,20 @@ from uuid import UUID
 import asyncpg
 from dotenv import load_dotenv
 
-ROOT = Path(__file__).resolve().parents[3]
-BACKEND = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(BACKEND))
+SCRIPT_PATH = Path(__file__).resolve()
+
+# Host path:
+#   <repo>/apps/webapp-backend/scripts/seed.py
+# Container path:
+#   /app/scripts/seed.py
+if len(SCRIPT_PATH.parents) >= 4 and (SCRIPT_PATH.parents[3] / "apps" / "webapp-backend").exists():
+    ROOT = SCRIPT_PATH.parents[3]
+    BACKEND_ROOT = ROOT / "apps" / "webapp-backend"
+else:
+    BACKEND_ROOT = SCRIPT_PATH.parents[1]
+    ROOT = BACKEND_ROOT
+
+sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.security import hash_password  # noqa: E402
 from app.services.license_service import generate_license_key  # noqa: E402

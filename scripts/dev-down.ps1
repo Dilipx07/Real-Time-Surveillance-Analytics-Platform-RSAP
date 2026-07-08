@@ -1,4 +1,5 @@
 param(
+    [string]$EnvFile = ".\.env",
     [string[]]$ComposeFile = @(".\infra\docker-compose.yml", ".\infra\docker-compose.dev.yml"),
     [switch]$Volumes
 )
@@ -7,7 +8,11 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $RepoRoot
 
-$args = @("compose")
+if (-not (Test-Path $EnvFile)) {
+    throw "Missing $EnvFile. Create it first: Copy-Item .\.env.example .\.env"
+}
+
+$args = @("compose", "--env-file", $EnvFile)
 foreach ($file in $ComposeFile) {
     $args += @("-f", $file)
 }

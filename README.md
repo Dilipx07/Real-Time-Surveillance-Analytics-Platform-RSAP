@@ -28,29 +28,31 @@ Requirements: Docker Desktop with Linux containers and Docker Compose V2.
 ```powershell
 Copy-Item .env.example .env
 # Replace every change_me value in .env before using the stack outside local development.
-docker compose -f .\infra\docker-compose.yml up -d
-docker compose -f .\infra\docker-compose.yml ps
+docker compose --env-file .\.env -f .\infra\docker-compose.yml up -d
+docker compose --env-file .\.env -f .\infra\docker-compose.yml ps
 ```
+
+For local development and smoke testing only, use simple non-placeholder values that pass validation, such as `POSTGRES_PASSWORD=postgres123`, `REDIS_PASSWORD=redis123`, `MINIO_ACCESS_KEY=rsapminio`, `MINIO_SECRET_KEY=minio12345678901`, `ADMIN_EMAIL=admin@rsap.local`, `ADMIN_PASSWORD=admin123`, `FILE_SERVER_SERVICE_TOKEN=filetoken12345678`, `LICENSE_SIGNING_SECRET=licensesecret123`, `JWT_SECRET=jwtsecret123456789012345678901234`, `AES_ENCRYPTION_KEY=12345678901234567890123456789012`, and `MINIO_PUBLIC_ENDPOINT=localhost:9000`. Do not commit `.env` or real secrets.
 
 Redis is managed by Docker Compose, is password protected, persists through AOF, and is available only to containers on `rsap-net`. It deliberately has no host port mapping.
 
 For source-mounted application development:
 
 ```powershell
-docker compose -f .\infra\docker-compose.yml -f .\infra\docker-compose.dev.yml up -d
+docker compose --env-file .\.env -f .\infra\docker-compose.yml -f .\infra\docker-compose.dev.yml up -d
 ```
 
 `infra/docker-compose.dev.yml` is a development overlay, not a standalone compose project. Validate it together with the base file:
 
 ```powershell
-docker compose -f .\infra\docker-compose.yml config --quiet
-docker compose -f .\infra\docker-compose.yml -f .\infra\docker-compose.dev.yml config --quiet
+docker compose --env-file .\.env -f .\infra\docker-compose.yml config --quiet
+docker compose --env-file .\.env -f .\infra\docker-compose.yml -f .\infra\docker-compose.dev.yml config --quiet
 ```
 
 Stop either stack with:
 
 ```powershell
-docker compose -f .\infra\docker-compose.yml down
+docker compose --env-file .\.env -f .\infra\docker-compose.yml down
 ```
 
 ## Service URLs
@@ -88,11 +90,11 @@ Protected central API requests carry both `Authorization: Bearer <JWT>` and `X-S
 ## Infrastructure validation
 
 ```powershell
-docker compose -f .\infra\docker-compose.yml config --quiet
-docker compose -f .\infra\docker-compose.yml -f .\infra\docker-compose.dev.yml config --quiet
-docker compose -f .\infra\docker-compose.yml build
-docker compose -f .\infra\docker-compose.yml up -d postgres redis minio
-docker compose -f .\infra\docker-compose.yml logs --tail 100 postgres redis minio
+docker compose --env-file .\.env -f .\infra\docker-compose.yml config --quiet
+docker compose --env-file .\.env -f .\infra\docker-compose.yml -f .\infra\docker-compose.dev.yml config --quiet
+docker compose --env-file .\.env -f .\infra\docker-compose.yml build
+docker compose --env-file .\.env -f .\infra\docker-compose.yml up -d postgres redis minio
+docker compose --env-file .\.env -f .\infra\docker-compose.yml logs --tail 100 postgres redis minio
 ```
 
 The integration frontend uses the currently patched Next.js line to keep production audit clean. This is an Agent-7 integration decision and supersedes the older architecture text that mentioned Next.js 14 for the recovered central console shell.

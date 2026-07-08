@@ -1,5 +1,5 @@
-COMPOSE=docker compose -f infra/docker-compose.yml
-COMPOSE_DEV=docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml
+COMPOSE=docker compose --env-file .env -f infra/docker-compose.yml
+COMPOSE_DEV=docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.dev.yml
 
 .PHONY: dev prod stop logs db-migrate seed desktop health smoke compose-check
 

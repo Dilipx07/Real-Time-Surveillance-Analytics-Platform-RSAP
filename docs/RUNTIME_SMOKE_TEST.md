@@ -9,14 +9,16 @@ Set-Location D:\Open-CV\RSAP-Agent-7
 Copy-Item .\.env.example .\.env -Force
 notepad .\.env
 python .\scripts\check-env.py
-docker compose -f .\infra\docker-compose.yml config --quiet
-docker compose -f .\infra\docker-compose.yml -f .\infra\docker-compose.dev.yml config --quiet
+docker compose --env-file .\.env -f .\infra\docker-compose.yml config --quiet
+docker compose --env-file .\.env -f .\infra\docker-compose.yml -f .\infra\docker-compose.dev.yml config --quiet
 .\scripts\dev-up.ps1 -Build
 .\scripts\seed-admin.ps1
 .\scripts\dev-health.ps1 -SkipDesktop
 ```
 
 `infra/docker-compose.dev.yml` is a development overlay and is validated with `infra/docker-compose.yml`; it is not intended to pass standalone compose validation.
+
+Docker Compose commands in this repo pass the root `.env` explicitly with `--env-file .\.env`; do not copy `.env` into `infra\.env`. For local smoke testing only, simple non-placeholder credentials such as `POSTGRES_PASSWORD=postgres123`, `REDIS_PASSWORD=redis123`, `MINIO_ACCESS_KEY=rsapminio`, `MINIO_SECRET_KEY=minio12345678901`, `ADMIN_EMAIL=admin@rsap.local`, `ADMIN_PASSWORD=admin123`, `FILE_SERVER_SERVICE_TOKEN=filetoken12345678`, `LICENSE_SIGNING_SECRET=licensesecret123`, `JWT_SECRET=jwtsecret123456789012345678901234`, `AES_ENCRYPTION_KEY=12345678901234567890123456789012`, and `MINIO_PUBLIC_ENDPOINT=localhost:9000` are acceptable. Do not commit `.env` or real secrets.
 
 The integration frontend uses the currently patched Next.js line to keep production audit clean. This is an Agent-7 integration decision and supersedes the older architecture text that mentioned Next.js 14 for the recovered central console shell.
 

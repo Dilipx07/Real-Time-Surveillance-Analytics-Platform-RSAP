@@ -87,6 +87,8 @@ services:
 
       AES_ENCRYPTION_KEY: ${AES_ENCRYPTION_KEY:?AES_ENCRYPTION_KEY is required}
       LICENSE_SIGNING_SECRET: ${LICENSE_SIGNING_SECRET:?LICENSE_SIGNING_SECRET is required}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?ADMIN_EMAIL is required}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
       APP_ENV: ${APP_ENV:-production}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,tauri://localhost}
     ports:

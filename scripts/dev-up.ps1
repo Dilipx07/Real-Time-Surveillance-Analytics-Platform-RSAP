@@ -1,6 +1,7 @@
 param(
     [switch]$Build,
     [switch]$DependenciesOnly,
+    [string]$EnvFile = ".\.env",
     [string[]]$ComposeFile = @(".\infra\docker-compose.yml", ".\infra\docker-compose.dev.yml")
 )
 
@@ -8,8 +9,8 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $RepoRoot
 
-if (-not (Test-Path ".\.env")) {
-    throw "Missing .env. Create it first: Copy-Item .\.env.example .\.env"
+if (-not (Test-Path $EnvFile)) {
+    throw "Missing $EnvFile. Create it first: Copy-Item .\.env.example .\.env"
 }
 
 $services = @("postgres", "redis", "minio")
@@ -17,7 +18,7 @@ if (-not $DependenciesOnly) {
     $services += @("webapp-backend", "file-server", "webapp-frontend")
 }
 
-$args = @("compose")
+$args = @("compose", "--env-file", $EnvFile)
 foreach ($file in $ComposeFile) {
     $args += @("-f", $file)
 }
