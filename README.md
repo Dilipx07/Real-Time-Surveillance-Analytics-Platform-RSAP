@@ -23,16 +23,32 @@ infra/
 
 ## Quick start
 
-Requirements: Docker Desktop with Linux containers and Docker Compose V2.
+Requirements: Docker Desktop with Linux containers and Docker Compose V2, Python 3.12, and Node/npm for the desktop frontend.
 
 ```powershell
-Copy-Item .env.example .env
-# Replace every change_me value in .env before using the stack outside local development.
-docker compose --env-file .\.env -f .\infra\docker-compose.yml up -d
-docker compose --env-file .\.env -f .\infra\docker-compose.yml ps
+python .\scripts\run-all.py up
+python .\scripts\run-all.py health
+python .\scripts\run-all.py smoke
+python .\scripts\run-all.py down
 ```
 
-For local development and smoke testing only, use simple non-placeholder values that pass validation, such as `POSTGRES_PASSWORD=postgres123`, `REDIS_PASSWORD=redis123`, `MINIO_ACCESS_KEY=rsapminio`, `MINIO_SECRET_KEY=minio12345678901`, `ADMIN_EMAIL=admin@rsap.local`, `ADMIN_PASSWORD=admin123`, `FILE_SERVER_SERVICE_TOKEN=filetoken12345678`, `LICENSE_SIGNING_SECRET=licensesecret123`, `JWT_SECRET=jwtsecret123456789012345678901234`, `AES_ENCRYPTION_KEY=12345678901234567890123456789012`, and `MINIO_PUBLIC_ENDPOINT=localhost:9000`. Do not commit `.env` or real secrets.
+Linux:
+
+```bash
+python3 scripts/run-all.py up
+python3 scripts/run-all.py health
+python3 scripts/run-all.py smoke
+python3 scripts/run-all.py down
+```
+
+The runner starts Docker central services and local desktop services, writes desktop logs and process metadata under ignored `.runtime/`, and creates a local-only `.env` if one does not exist. For local development and smoke testing only, it uses simple non-placeholder values that pass validation, such as `POSTGRES_PASSWORD=postgres123`, `REDIS_PASSWORD=redis123`, `MINIO_ACCESS_KEY=rsapminio`, `MINIO_SECRET_KEY=miniosecret123`, `ADMIN_EMAIL=admin@rsap.local`, `ADMIN_PASSWORD=admin123`, `FILE_SERVER_SERVICE_TOKEN=filetoken123456`, `LICENSE_SIGNING_SECRET=licensesecret123456`, `JWT_SECRET=jwtsecret123456789012345678901234`, `AES_ENCRYPTION_KEY=12345678901234567890123456789012`, and `MINIO_PUBLIC_ENDPOINT=localhost:9000`. Do not commit `.env` or real secrets.
+
+Local login:
+
+```text
+admin@rsap.local
+admin123
+```
 
 Redis is managed by Docker Compose, is password protected, persists through AOF, and is available only to containers on `rsap-net`. It deliberately has no host port mapping.
 
@@ -105,15 +121,14 @@ Never commit `.env`, credentials, generated databases, model files, or local sto
 
 ## End-user runtime workflow
 
-Agent-7 integration scripts provide a PowerShell-friendly path for local validation:
+Use the cross-platform runner for full central plus desktop validation:
 
 ```powershell
-Copy-Item .\.env.example .\.env -Force
-notepad .\.env
-.\scripts\dev-up.ps1 -Build
-.\scripts\seed-admin.ps1
-.\scripts\dev-health.ps1 -SkipDesktop
-.\scripts\e2e-smoke.ps1 -SkipDesktop
+python .\scripts\run-all.py up --install
+python .\scripts\run-all.py health
+python .\scripts\run-all.py smoke
+python .\scripts\run-all.py status
+python .\scripts\run-all.py down
 ```
 
-See `docs/RUNTIME_SMOKE_TEST.md` for the full central and desktop manual test guide.
+Linux uses the same commands with `python3 scripts/run-all.py ...`. The older PowerShell helpers in `scripts/` remain available for focused central-service work and are reused by the runner on Windows where practical. See `docs/RUNTIME_SMOKE_TEST.md` for the full central and desktop manual test guide.

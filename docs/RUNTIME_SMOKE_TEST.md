@@ -1,61 +1,64 @@
 # RSAP Runtime Smoke Test
 
-This guide validates RSAP from a fresh Windows clone with Docker Desktop, Python 3.12, Node/npm, and Rust only when building the Tauri desktop package.
+This guide validates RSAP from a fresh clone with Docker Desktop or Docker Engine, Python 3.12, Node/npm, and Rust only when building the Tauri desktop package.
 
 ## Start
 
+Windows PowerShell:
+
 ```powershell
-Set-Location D:\Open-CV\RSAP-Agent-7
-Copy-Item .\.env.example .\.env -Force
-notepad .\.env
-python .\scripts\check-env.py
-docker compose --env-file .\.env -f .\infra\docker-compose.yml config --quiet
-docker compose --env-file .\.env -f .\infra\docker-compose.yml -f .\infra\docker-compose.dev.yml config --quiet
-.\scripts\dev-up.ps1 -Build
-.\scripts\seed-admin.ps1
-.\scripts\dev-health.ps1 -SkipDesktop
+Set-Location D:\Open-CV\Real-Time-Surveillance-Analytics-Platform-RSAP
+python .\scripts\run-all.py up
+python .\scripts\run-all.py health
+python .\scripts\run-all.py smoke
+python .\scripts\run-all.py status
+python .\scripts\run-all.py down
+```
+
+Linux shell:
+
+```bash
+cd /path/to/Real-Time-Surveillance-Analytics-Platform-RSAP
+python3 scripts/run-all.py up
+python3 scripts/run-all.py health
+python3 scripts/run-all.py smoke
+python3 scripts/run-all.py status
+python3 scripts/run-all.py down
 ```
 
 `infra/docker-compose.dev.yml` is a development overlay and is validated with `infra/docker-compose.yml`; it is not intended to pass standalone compose validation.
 
-Docker Compose commands in this repo pass the root `.env` explicitly with `--env-file .\.env`; do not copy `.env` into `infra\.env`. For local smoke testing only, simple non-placeholder credentials such as `POSTGRES_PASSWORD=postgres123`, `REDIS_PASSWORD=redis123`, `MINIO_ACCESS_KEY=rsapminio`, `MINIO_SECRET_KEY=minio12345678901`, `ADMIN_EMAIL=admin@rsap.local`, `ADMIN_PASSWORD=admin123`, `FILE_SERVER_SERVICE_TOKEN=filetoken12345678`, `LICENSE_SIGNING_SECRET=licensesecret123`, `JWT_SECRET=jwtsecret123456789012345678901234`, `AES_ENCRYPTION_KEY=12345678901234567890123456789012`, and `MINIO_PUBLIC_ENDPOINT=localhost:9000` are acceptable. Do not commit `.env` or real secrets.
+The runner creates a local-only `.env` if one is missing, starts central Docker services with `docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.dev.yml`, starts the desktop backend and desktop frontend as background processes, writes logs under ignored `.runtime/`, and prints service URLs plus local login credentials.
+
+Docker Compose commands in this repo pass the root `.env` explicitly with `--env-file .env`; do not copy `.env` into `infra/.env`. For local smoke testing only, simple non-placeholder credentials such as `POSTGRES_PASSWORD=postgres123`, `REDIS_PASSWORD=redis123`, `MINIO_ACCESS_KEY=rsapminio`, `MINIO_SECRET_KEY=miniosecret123`, `ADMIN_EMAIL=admin@rsap.local`, `ADMIN_PASSWORD=admin123`, `FILE_SERVER_SERVICE_TOKEN=filetoken123456`, `LICENSE_SIGNING_SECRET=licensesecret123456`, `JWT_SECRET=jwtsecret123456789012345678901234`, `AES_ENCRYPTION_KEY=12345678901234567890123456789012`, and `MINIO_PUBLIC_ENDPOINT=localhost:9000` are acceptable. Do not commit `.env` or real secrets.
 
 The integration frontend uses the currently patched Next.js line to keep production audit clean. This is an Agent-7 integration decision and supersedes the older architecture text that mentioned Next.js 14 for the recovered central console shell.
 
 Open:
 
 ```text
-Central webapp: http://localhost:3000
-Central API: http://localhost:8000/health
-File server: http://localhost:8002/health
-Desktop webapp: http://127.0.0.1:1420
-Desktop API: http://127.0.0.1:8001/health
-MinIO console: http://localhost:9001
+Central webapp:   http://localhost:3000
+Central backend:  http://localhost:8000
+File server:      http://localhost:8002
+Desktop backend:  http://127.0.0.1:8001
+Desktop frontend: http://127.0.0.1:1420
+MinIO console:    http://localhost:9001
+```
+
+Local login:
+
+```text
+admin@rsap.local
+admin123
 ```
 
 Sign in with `ADMIN_EMAIL` and `ADMIN_PASSWORD` from `.env`. The central console must show Dashboard, Users, Licenses, Cameras, Persons, Analytics, and Settings. Empty pages should say not configured, not show fabricated data.
 
 ## Desktop Runtime
 
-```powershell
-Set-Location D:\Open-CV\RSAP-Agent-7\apps\desktop-backend
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -m pip install -e ..\..\packages\cv-engine
-python -m uvicorn main:app --host 127.0.0.1 --port 8001
-```
+The runner starts the desktop backend on `http://127.0.0.1:8001` with the local sqlite-test driver and starts the desktop frontend on `http://127.0.0.1:1420`. Use `python .\scripts\run-all.py up --install` on Windows, or `python3 scripts/run-all.py up --install` on Linux, when dependencies need to be installed or refreshed.
 
-In another PowerShell window:
-
-```powershell
-Set-Location D:\Open-CV\RSAP-Agent-7\apps\desktop-frontend
-npm install
-npm run dev
-```
-
-Open `http://127.0.0.1:1420`, verify login or degraded/offline handling, then open the dashboard, orchestration, and sync/dead-letter screens.
+Open `http://127.0.0.1:1420`, sign in with the local login above, then verify dashboard, orchestration, and sync/dead-letter screens.
 
 ## Manual End-User Flow
 
@@ -65,8 +68,8 @@ Open `http://127.0.0.1:1420`, verify login or degraded/offline handling, then op
 4. Open Cameras and verify it reports not configured until a real camera is added.
 5. Open Persons and Analytics and verify empty states or live backend records.
 6. Open the desktop UI and verify dashboard, orchestration, and sync screens load.
-7. Run `.\scripts\e2e-smoke.ps1` from the repo root.
-8. Stop services with `.\scripts\dev-down.ps1`.
+7. Run `python .\scripts\run-all.py smoke` from the repo root.
+8. Stop services with `python .\scripts\run-all.py down`.
 
 ## Troubleshooting
 
@@ -74,7 +77,7 @@ Ports in use: stop the conflicting process or change ports in `infra/docker-comp
 
 Docker Desktop not running: start Docker Desktop and wait until `docker info` succeeds.
 
-Postgres health failed: verify `POSTGRES_PASSWORD` is set in `.env`, remove stale local volumes only when you intend to reset data, then rerun `.\scripts\dev-up.ps1`.
+Postgres health failed: verify `POSTGRES_PASSWORD` is set in `.env`, remove stale local volumes only when you intend to reset data, then rerun `python .\scripts\run-all.py up`.
 
 Redis auth failed: ensure `REDIS_PASSWORD` and `REDIS_URL` use the same password. Redis is internal-only and should not expose port 6379.
 

@@ -68,6 +68,7 @@ build/
 coverage/
 
 # Runtime data
+.runtime/
 *.db
 *.db-*
 *.sqlite
