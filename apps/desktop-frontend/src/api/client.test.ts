@@ -30,6 +30,18 @@ describe("DesktopApiClient", () => {
     await expect(api.request("/health", { auth: false })).rejects.toMatchObject({ code: "network_error" });
   });
 
+  it("binds the default browser fetch to window", async () => {
+    const fetchImpl = vi.fn(function (this: unknown) {
+      if (this !== window) {
+        throw new TypeError("Illegal invocation");
+      }
+      return Promise.resolve(jsonResponse({ success: true, data: { ok: true }, error: null }));
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+    const api = new DesktopApiClient({ baseUrl: "http://local" });
+    await expect(api.request("/health", { auth: false })).resolves.toEqual({ ok: true });
+  });
+
   it("attaches protected auth headers", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ success: true, data: [], error: null }));
     const api = new DesktopApiClient({

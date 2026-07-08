@@ -102,7 +102,7 @@ export class DesktopApiClient {
     this.timeoutMs = options.timeoutMs ?? 10000;
     this.getSession = options.getSession ?? (() => null);
     this.onUnauthorized = options.onUnauthorized;
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.fetchImpl = options.fetchImpl ?? window.fetch.bind(window);
   }
 
   async request<T>(
