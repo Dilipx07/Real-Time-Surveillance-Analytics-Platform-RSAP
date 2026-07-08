@@ -28,6 +28,8 @@ Open:
 Central webapp: http://localhost:3000
 Central API: http://localhost:8000/health
 File server: http://localhost:8002/health
+Desktop webapp: http://127.0.0.1:1420
+Desktop API: http://127.0.0.1:8001/health
 MinIO console: http://localhost:9001
 ```
 
@@ -53,7 +55,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`, verify login or degraded/offline handling, then open the dashboard, orchestration, and sync/dead-letter screens.
+Open `http://127.0.0.1:1420`, verify login or degraded/offline handling, then open the dashboard, orchestration, and sync/dead-letter screens.
 
 ## Manual End-User Flow
 
@@ -68,7 +70,7 @@ Open `http://localhost:5173`, verify login or degraded/offline handling, then op
 
 ## Troubleshooting
 
-Ports in use: stop the conflicting process or change ports in `infra/docker-compose.yml`. Common ports are 3000, 5173, 8000, 8001, 8002, 9000, and 9001.
+Ports in use: stop the conflicting process or change ports in `infra/docker-compose.yml` or the desktop Vite config. Common ports are 3000, 1420, 8000, 8001, 8002, 9000, and 9001.
 
 Docker Desktop not running: start Docker Desktop and wait until `docker info` succeeds.
 

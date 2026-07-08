@@ -62,6 +62,8 @@ docker compose --env-file .\.env -f .\infra\docker-compose.yml down
 | Web application | http://localhost:3000 | https://app.rsap.local |
 | Central API | http://localhost:8000 | https://api.rsap.local |
 | File service | http://localhost:8002 | https://files.rsap.local |
+| Desktop webapp | http://127.0.0.1:1420 | — |
+| Desktop API | http://127.0.0.1:8001 | — |
 | MinIO API | http://localhost:9000 | — |
 | MinIO console | http://localhost:9001 | https://minio.rsap.local |
 | PostgreSQL | localhost:5432 | — |

@@ -32,6 +32,16 @@ def test_startup_api_auth_envelope_and_shutdown(settings):
         assert health.status_code == 200
         assert health.json()["data"]["database"] == "ok"
 
+        cors_health = client.options(
+            "/health",
+            headers={
+                "Origin": "http://127.0.0.1:1420",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert cors_health.status_code == 200
+        assert cors_health.headers["access-control-allow-origin"] == "http://127.0.0.1:1420"
+
         denied = client.get("/cameras")
         assert denied.status_code == 401
         assert denied.json() == {

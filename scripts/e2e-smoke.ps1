@@ -3,7 +3,7 @@ param(
     [string]$FileServerUrl = "http://localhost:8002",
     [string]$WebappUrl = "http://localhost:3000",
     [string]$DesktopBackendUrl = "http://127.0.0.1:8001",
-    [string]$DesktopFrontendUrl = "http://localhost:5173",
+    [string]$DesktopFrontendUrl = "http://127.0.0.1:1420",
     [switch]$SkipFrontend,
     [switch]$SkipDesktop
 )

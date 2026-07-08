@@ -66,6 +66,7 @@ class Settings(BaseSettings):
         "tauri://localhost",
         "http://tauri.localhost",
         "https://tauri.localhost",
+        "http://127.0.0.1:1420",
     )
 
     @field_validator("host")
