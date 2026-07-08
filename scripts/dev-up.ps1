@@ -1,7 +1,7 @@
 param(
     [switch]$Build,
     [switch]$DependenciesOnly,
-    [string]$ComposeFile = ".\infra\docker-compose.yml"
+    [string[]]$ComposeFile = @(".\infra\docker-compose.yml", ".\infra\docker-compose.dev.yml")
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,7 +17,11 @@ if (-not $DependenciesOnly) {
     $services += @("webapp-backend", "file-server", "webapp-frontend")
 }
 
-$args = @("compose", "-f", $ComposeFile, "up", "-d")
+$args = @("compose")
+foreach ($file in $ComposeFile) {
+    $args += @("-f", $file)
+}
+$args += @("up", "-d")
 if ($Build) {
     $args += "--build"
 }

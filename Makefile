@@ -1,7 +1,7 @@
 COMPOSE=docker compose -f infra/docker-compose.yml
 COMPOSE_DEV=docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml
 
-.PHONY: dev prod stop logs db-migrate seed desktop health smoke
+.PHONY: dev prod stop logs db-migrate seed desktop health smoke compose-check
 
 dev:
 	$(COMPOSE_DEV) up -d
@@ -29,3 +29,7 @@ health:
 
 smoke:
 	powershell -ExecutionPolicy Bypass -File scripts/e2e-smoke.ps1
+
+compose-check:
+	$(COMPOSE) config --quiet
+	$(COMPOSE_DEV) config --quiet

@@ -9,11 +9,16 @@ Set-Location D:\Open-CV\RSAP-Agent-7
 Copy-Item .\.env.example .\.env -Force
 notepad .\.env
 python .\scripts\check-env.py
-docker compose -f .\infra\docker-compose.yml config
+docker compose -f .\infra\docker-compose.yml config --quiet
+docker compose -f .\infra\docker-compose.yml -f .\infra\docker-compose.dev.yml config --quiet
 .\scripts\dev-up.ps1 -Build
 .\scripts\seed-admin.ps1
 .\scripts\dev-health.ps1 -SkipDesktop
 ```
+
+`infra/docker-compose.dev.yml` is a development overlay and is validated with `infra/docker-compose.yml`; it is not intended to pass standalone compose validation.
+
+The integration frontend uses the currently patched Next.js line to keep production audit clean. This is an Agent-7 integration decision and supersedes the older architecture text that mentioned Next.js 14 for the recovered central console shell.
 
 Open:
 

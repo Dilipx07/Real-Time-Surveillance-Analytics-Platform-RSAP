@@ -40,6 +40,13 @@ For source-mounted application development:
 docker compose -f .\infra\docker-compose.yml -f .\infra\docker-compose.dev.yml up -d
 ```
 
+`infra/docker-compose.dev.yml` is a development overlay, not a standalone compose project. Validate it together with the base file:
+
+```powershell
+docker compose -f .\infra\docker-compose.yml config --quiet
+docker compose -f .\infra\docker-compose.yml -f .\infra\docker-compose.dev.yml config --quiet
+```
+
 Stop either stack with:
 
 ```powershell
@@ -81,11 +88,14 @@ Protected central API requests carry both `Authorization: Bearer <JWT>` and `X-S
 ## Infrastructure validation
 
 ```powershell
-docker compose -f .\infra\docker-compose.yml config
+docker compose -f .\infra\docker-compose.yml config --quiet
+docker compose -f .\infra\docker-compose.yml -f .\infra\docker-compose.dev.yml config --quiet
 docker compose -f .\infra\docker-compose.yml build
 docker compose -f .\infra\docker-compose.yml up -d postgres redis minio
 docker compose -f .\infra\docker-compose.yml logs --tail 100 postgres redis minio
 ```
+
+The integration frontend uses the currently patched Next.js line to keep production audit clean. This is an Agent-7 integration decision and supersedes the older architecture text that mentioned Next.js 14 for the recovered central console shell.
 
 Never commit `.env`, credentials, generated databases, model files, or local storage data.
 

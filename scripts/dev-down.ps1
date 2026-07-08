@@ -1,5 +1,5 @@
 param(
-    [string]$ComposeFile = ".\infra\docker-compose.yml",
+    [string[]]$ComposeFile = @(".\infra\docker-compose.yml", ".\infra\docker-compose.dev.yml"),
     [switch]$Volumes
 )
 
@@ -7,7 +7,11 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $RepoRoot
 
-$args = @("compose", "-f", $ComposeFile, "down")
+$args = @("compose")
+foreach ($file in $ComposeFile) {
+    $args += @("-f", $file)
+}
+$args += "down"
 if ($Volumes) {
     $args += "--volumes"
 }
